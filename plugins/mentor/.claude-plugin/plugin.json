@@ -1,0 +1,45 @@
+{
+  "name": "mentor",
+  "displayName": "Mentor",
+  "version": "0.1.0",
+  "description": "Mentor mode: Claude points the way instead of writing your code. Blocks file edits, gates requests for ready-made code until you have tried, escalates hints step by step and reviews your week.",
+  "author": {
+    "name": "Przemysław Lewalski"
+  },
+  "license": "MIT",
+  "keywords": ["learning", "mentor", "skills", "deliberate-practice"],
+  "userConfig": {
+    "language": {
+      "type": "string",
+      "title": "Language of hook messages",
+      "description": "pl or en. Claude itself answers in the language you write in.",
+      "default": "pl"
+    },
+    "off_minutes": {
+      "type": "number",
+      "title": "Pause length (minutes)",
+      "description": "How long /mentor:off lifts the blocks before mentor mode comes back on its own.",
+      "default": 30,
+      "min": 5,
+      "max": 240
+    },
+    "focus_topics": {
+      "type": "string",
+      "title": "Focus topics",
+      "description": "Comma-separated areas you want to grow in, e.g. 'Angular signals, RxJS, networking'. Used by /mentor:whats-new and the weekly quiz.",
+      "default": ""
+    },
+    "bash_guard": {
+      "type": "boolean",
+      "title": "Ask before file-writing shell commands",
+      "description": "Best effort: shell commands that look like they write files (redirects, sed -i, Set-Content, git apply…) trigger a permission prompt while mentor mode is on.",
+      "default": true
+    },
+    "gate_regex": {
+      "type": "string",
+      "title": "Custom gate pattern (regex)",
+      "description": "Case-insensitive regex for prompts that ask for ready-made code. Empty = built-in Polish + English pattern.",
+      "default": ""
+    }
+  }
+}

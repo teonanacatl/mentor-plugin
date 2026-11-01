@@ -1,0 +1,14 @@
+{
+  "name": "mentor-plugin",
+  "description": "Claude Code plugins for learning while you work.",
+  "owner": {
+    "name": "Przemysław Lewalski"
+  },
+  "plugins": [
+    {
+      "name": "mentor",
+      "source": "./plugins/mentor",
+      "description": "Mentor mode for Claude Code: guides instead of writing your code, with enforced edit blocking, a try-first gate, a hint ladder and a weekly review."
+    }
+  ]
+}
