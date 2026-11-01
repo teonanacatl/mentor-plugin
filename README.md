@@ -22,10 +22,10 @@ itself, so the rules hold without anyone's good will.
 
 ## Install
 
-From GitHub (after pushing this repo):
+From GitHub:
 
 ```
-/plugin marketplace add <github-user>/mentor-plugin
+/plugin marketplace add teonanacatl/mentor-plugin
 /plugin install mentor@mentor-plugin
 ```
 
