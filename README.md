@@ -76,9 +76,11 @@ and the self-protection keeps it from editing the state file or the settings ins
 "refactor this", "give me a function that…", "make it work", "zmień to na async", "can you code
 this up?". Information questions pass: "how do I fix this?", "czy powinienem dopisać test?",
 "popraw mnie, jeśli się mylę". So do your own plans ("I want to build a parser", "let me write it
-myself", "I need to implement the cache"): a verb after "I", "we" or "let me" is yours. Pasted
-material is not read as a request: fenced and indented code, `> quotes`, comment lines and
-`inline code` are removed first. The pattern knows Polish word boundaries, so the first person
+myself", "I'm going to implement the cache"): a verb is yours when "I", "we" or "let me" is its
+subject, right before it. An "I" earlier in the sentence does not count: "I give up, write the
+code for me" is an order, and so is each clause after a comma, semicolon, "but" or "so". Pasted
+material is not read as a request: fenced and indented code, `> quotes`, `//` and `/* */`
+comments and `inline code` are removed first (a `* item` list line stays: it is not a comment). The pattern knows Polish word boundaries, so the first person
 ("napiszę", "poprawię") passes. Only real slash commands (`/review …`) skip the gate; `/ napisz to`
 does not.
 
@@ -97,6 +99,10 @@ since the task started, or, without a task, since the session started:
   `coverage.json` does not open the gate, while `scripts/build/release.js` still counts;
 - changes made before the task or the session do not count: a repo that is always a bit dirty
   is not a permanent pass. If that earlier work is your attempt, say so with `/mentor:try`;
+- code that appeared during a pause (`/mentor:off`) does not count either, uncommitted or
+  committed: in normal mode Claude may have written it. Your work from before the pause still
+  opens the gate. `/mentor:done` lists those lines and files apart, the journal notes them, and
+  the weekly stats count such a task as "closed with code from a pause", not at any hint level;
 - a task opened implicitly by `/mentor:hint` or `/mentor:try` keeps the session's starting point,
   so what you wrote in this session counts;
 - `/mentor:try <hypothesis>` opens the gate for the task without any file change. It is an
@@ -179,16 +185,18 @@ from the conversation and goes one level up, or takes the level you give (`/ment
   `userConfig` option, so it would add a model call to every prompt of every user, and it cannot
   see whether the attempt was already made; it is not there yet.
 - **Protected places are recognised by name.** A command that builds the path at run time
-  (`HOME + '/.cl' + 'aude'`) is not recognised. A git commit message that mentions `.claude` is
-  refused as if it touched it.
+  (`HOME + '/.cl' + 'aude'`) is not recognised. Protected are `~/.claude`, settings files,
+  plugins, mentor's data and removing `.mentor`; a project's other `.claude/` files (shared
+  commands and agents) are team work, free in a pause and logged when written then.
 - **Timeouts fail open.** When a hook errors, file changes are denied and everything else passes;
   when it runs out of time, Claude Code lets the tool call through.
 - **The shell guard is a heuristic.** It will miss creative commands. With `bash_guard_deny`
   it denies instead of asking.
 - **Code in chat is only logged.** The output style asks Claude not to hand over solutions; a
   `Stop` hook sees the answer only after it was shown.
-- **MCP file tools** are recognised by their name (`write`, `edit`, `create`, `move`, `delete`…)
-  and a path-like argument. A server with unusual names may slip through.
+- **MCP file tools** are recognised by their name (`write`, `edit`, `create`, `move`, `delete`…,
+  camelCase too) and an argument that looks like a local path. Remote ids (`fileId`) and URLs are
+  not paths, so Drive or Docs keep working. A server with unusual names may slip through.
 - **You will be slower.** That is the price of learning, not a bug.
 
 ## Development

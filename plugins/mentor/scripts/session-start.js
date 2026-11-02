@@ -17,7 +17,7 @@ try {
   } catch (err) {
     lib.logError('prune', err);
   }
-  let changed = lib.expirePause(proj, state);
+  let changed = lib.expirePause(proj, state, cfg);
   const enabled = lib.isEnabled(cfg, proj, state);
   if (enabled && proj.git && !lib.hasSessionBaseline(state, input.session_id)) {
     lib.sessionBaseline(proj, cfg, state, input.session_id);

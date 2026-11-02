@@ -108,13 +108,21 @@ function looksLikeWrite(command) {
   return REDIRECT.test(unquoted) || FLAG_WRITE.test(unquoted) || WRITE_PATTERNS.some((re) => re.test(cleaned));
 }
 
-// Anything under a .claude directory (the user's config, a project's settings), mentor's data,
-// the .mentor marker or the settings keys.
+// What switches mentor mode off: the user's Claude config dir, Claude Code's settings files,
+// installed plugins and mentor's data. A project's other .claude/ files (shared commands, agents)
+// are ordinary team work and are not protected here; written during a pause they are logged.
+const USER_CONFIG = /(~|\$HOME|\$\{HOME\}|%USERPROFILE%|\$env:USERPROFILE)[\\/]\.claude\b/i;
 const PROTECTED_IN_SHELL = [
-  /(^|[^\w.-])\.claude([\\/'"\s]|$)/i, /settings(\.local)?\.json/i, /enabledPlugins/, /mentor-data/i,
-  /(^|[\s'"\\/=])\.mentor\b/, /CLAUDE_(CONFIG_DIR|PLUGIN_DATA)/,
+  USER_CONFIG, /\.claude[\\/]+settings(\.local)?\.json/i, /enabledPlugins/, /mentor-data/i,
+  /[\\/]\.claude[\\/]plugins\b/i, /plugins[\\/](data|cache|marketplaces)\b/i, /CLAUDE_(CONFIG_DIR|PLUGIN_DATA)/,
 ];
+// `cd .claude && sed -i … settings.json`: the dir and the file named apart.
+const SETTINGS_APART = (cmd) => /\.claude\b/i.test(cmd) && /(^|[\s'"\\/])settings(\.local)?\.json/i.test(cmd);
+// The .mentor marker may be added and committed; only removing it turns mentor mode off.
+const MARKER = /(^|[\s'"\\/=])\.mentor\b/;
+const REMOVES = /\b(rm|mv|del|erase|unlink|rename)\b|remove-item|move-item|rename-item|\bgit\s+(rm|mv|clean|stash|checkout|restore|reset)\b/i;
 const PLUGIN_CLI = /\bclaude\s+plugins?\s+(disable|uninstall|remove|rm|marketplace\s+(remove|rm))\b/i;
+const LASTING_IN_SHELL = /CLAUDE(\.local)?\.md|\.claude[\\/]+(agents|skills|commands|output-styles|hooks|rules)\b/i;
 
 // Commands that only read. Everything else touching a protected place is refused, so a write by
 // a route the heuristics do not know (an interpreter, sponge, a script under ~/.claude) fails too.
@@ -146,11 +154,15 @@ function isSafeRead(command) {
 function isTamper(command) {
   const cmd = String(command || '');
   if (PLUGIN_CLI.test(cmd)) return true;
+  if (MARKER.test(cmd) && REMOVES.test(cmd)) return true;
   const slashes = (s) => (process.platform === 'win32' ? s.toLowerCase() : s).replace(/\\/g, '/');
-  const touches = PROTECTED_IN_SHELL.some((re) => re.test(cmd)) ||
+  const touches = PROTECTED_IN_SHELL.some((re) => re.test(cmd)) || SETTINGS_APART(cmd) ||
     slashes(cmd).includes(slashes(lib.DATA_DIR)) || slashes(cmd).includes(slashes(configDir()));
   return touches && !isSafeRead(cmd);
 }
+
+// A shell command that writes lasting instructions for Claude (for the pause log).
+const writesLasting = (cmd) => LASTING_IN_SHELL.test(cmd) && (looksLikeWrite(cmd) || /\b(mkdir|git\s+add)\b/.test(cmd));
 
 // MCP tool names are split into words, so `fileWrite`, `apply_diff` and `start-process` are read.
 const MCP_WRITE = new Set(['write', 'edit', 'create', 'move', 'delete', 'remove', 'rename', 'patch', 'replace', 'insert',
@@ -167,30 +179,43 @@ function toolWords(tool) {
     .filter(Boolean);
 }
 
-// String values of the arguments whose key matches (nested objects and arrays included).
-function collect(value, keyRe, key = '', depth = 0, out = []) {
+// [key, value] pairs of string arguments whose key matches (nested objects and arrays included).
+// `joinArrays` turns an argv-style array into one command line.
+function collect(value, keyRe, joinArrays, key = '', depth = 0, out = []) {
   if (depth > 4 || value === null || value === undefined) return out;
   if (typeof value === 'string') {
-    if (keyRe.test(key) && value) out.push(value);
+    if (keyRe.test(key) && value) out.push([key, value]);
   } else if (Array.isArray(value)) {
-    if (keyRe.test(key) && value.every((v) => typeof v === 'string')) out.push(value.join(' '));
-    else for (const v of value) collect(v, keyRe, key, depth + 1, out);
+    if (joinArrays && keyRe.test(key) && value.every((v) => typeof v === 'string')) out.push([key, value.join(' ')]);
+    else for (const v of value) collect(v, keyRe, joinArrays, key, depth + 1, out);
   } else if (typeof value === 'object') {
-    for (const [k, v] of Object.entries(value)) collect(v, keyRe, k, depth + 1, out);
+    for (const [k, v] of Object.entries(value)) collect(v, keyRe, joinArrays, k, depth + 1, out);
   }
   return out;
 }
 
-// Paths an MCP tool would write to, or [] for a tool that does not write files.
+// A value that names a file on this machine, not a remote resource: `fileId: "1AbC…"` (Drive),
+// `uri: "https://…"` (a bookmark) are not paths.
+function isLocalPath(key, value) {
+  if (/(^|_)id$|[a-z]Id$|ids?$/i.test(key) && !/path|file$/i.test(key)) return false;
+  const v = value.trim();
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(v)) return /^file:\/\//i.test(v);
+  if (path.isAbsolute(v) || /^(\.{1,2}[\\/]|~([\\/]|$))/.test(v) || /[\\/]/.test(v)) return true;
+  return /^[^\s\\/:]+\.[A-Za-z0-9]{1,10}$/.test(v); // a bare file name with an extension
+}
+
+// Local paths an MCP tool would write to, or [] for a tool that does not write files.
 function mcpWriteTargets(tool, toolInput) {
   if (!toolWords(tool).some((w) => MCP_WRITE.has(w))) return [];
-  return collect(toolInput, PATH_KEY).map((p) => p.replace(/^file:\/\//, ''));
+  return collect(toolInput, PATH_KEY, false)
+    .filter(([k, v]) => isLocalPath(k, v))
+    .map(([, v]) => v.replace(/^file:\/\//i, ''));
 }
 
 // Commands or code an MCP tool would run, or [] for a tool that does not run anything.
 function mcpCommands(tool, toolInput) {
   if (!toolWords(tool).some((w) => MCP_EXEC.has(w))) return [];
-  return collect(toolInput, CODE_KEY);
+  return collect(toolInput, CODE_KEY, true).map(([, v]) => v);
 }
 
 function decide(decision, reason) {
@@ -218,7 +243,7 @@ function main() {
   if (state.pause && Date.now() >= state.pause.until) {
     lib.lockState(proj);
     state = lib.loadState(proj);
-    if (lib.expirePause(proj, state)) lib.saveState(proj, state);
+    if (lib.expirePause(proj, state, cfg)) lib.saveState(proj, state);
   }
   if (!lib.isEnabled(cfg, proj, state)) process.exit(0);
 
@@ -244,6 +269,7 @@ function main() {
     // Allowed, but the weekly review sees lasting instructions written while mentor mode was off.
     const lasting = [editFile, ...mcpTargets].filter((f) => f && isLastingInstruction(f, cwd));
     for (const f of lasting) lib.logEvent(proj, 'persist_write', { tool, file: f });
+    for (const c of commands.filter(writesLasting)) lib.logEvent(proj, 'persist_write', { tool, file: c.slice(0, 120) });
     process.exit(0);
   }
 

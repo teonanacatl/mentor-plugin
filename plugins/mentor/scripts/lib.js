@@ -31,7 +31,7 @@ const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 // Bumped when the way snapshots are hashed changes; older baselines are taken again.
 const SNAPSHOT_V = 2;
 const LOCK_WAIT_MS = 2000;
-const LOCK_STALE_MS = 10000;
+const LOCK_STALE_MS = 25000; // longer than the slowest hook (timeout 20 s), so a live lock is never taken over
 
 const LEVELS = {
   en: ['none', 'direction', 'concept', 'API', 'sketch'],
@@ -75,10 +75,12 @@ const DEFAULT_GATE = [
   `${B}zmie[nń]\\s+(mi\\s+)?(to|ten|t[eę]|tego|go|j[aą])${E}`,
   `${B}zr[oó]b\\s+reszt[eę]${E}`,
   `${B}potrzebuj[eę]\\s+(gotowego|gotowy|ca[lł]ego|ca[lł]y)\\s+(kodu|kod|rozwi[aą]zania|rozwi[aą]zanie)${E}`,
+  `${B}(wy[sś]lij|pode[sś]lij|przy[sś]lij|wklej)\\s+(mi\\s+)?(ca[lł]y\\s+|gotowy\\s+|gotowe\\s+)?` +
+    `(kod|rozwi[aą]zanie|gotowca|implementacj[eę]|funkcj[eę]|klas[eę])${E}`,
   `${B}(write|create|build|add|implement|refactor|rewrite|complete|generate|code|convert|change|update|make)\\s+(me\\s+)?` +
     `(it|this|that|the|a|an|my|some|missing|new|up|these|those)${E}`,
   `${B}code\\s+(it|this|that)\\s+up${E}`,
-  `${B}give\\s+me\\s+(the\\s+|a\\s+|an\\s+)?(\\w+\\s+)?(code|solution|implementation|fix|function|class|component|method|script|snippet|test)${E}`,
+  `${B}(give|send)\\s+me\\s+(the\\s+|a\\s+|an\\s+)?(\\w+\\s+)?(code|solution|implementation|fix|function|class|component|method|script|snippet|test)${E}`,
   `${B}show\\s+me\\s+(the\\s+)?(solution|implementation|fixed\\s+code|full\\s+code|complete\\s+code)${E}`,
   `${B}(fix|solve|finish)\\s+(it|this|that)${E}`,
   `${B}(do|finish|write)\\s+the\\s+rest${E}`,
@@ -94,15 +96,23 @@ function stripPasted(prompt) {
     .replace(/^\s*(```|~~~)[\s\S]*?^\s*\1[^\n]*$/gm, ' ')
     .replace(/^\s*(```|~~~)[\s\S]*$/m, ' ') // an unclosed fence runs to the end
     .replace(/`[^`\n]*`/g, ' ')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
     .split('\n')
-    .filter((line) => !/^(\s{4,}|\t)\S/.test(line) && !/^\s*(>|\/\/|#|\/\*|\*|--\s)/.test(line))
+    .filter((line) => !/^(\s{4,}|\t)\S/.test(line) && !/^\s*(>|\/\/|#|--\s)/.test(line)) // "* item" is a list, not a comment
     .join('\n');
 }
 
-// "I want to build a parser", "let me write the code myself": the user describes their own work.
-const FIRST_PERSON_I = /(^|[^\p{L}])I(?![\p{L}])/u; // uppercase only: Polish "i" means "and"
-const FIRST_PERSON = /(^|[^\p{L}])(i'll|i'd|i'm|i've|we|we'll|we're|we've|let\s+me|let's|lemme)(?![\p{L}])/iu;
-const firstPerson = (prefix) => FIRST_PERSON_I.test(prefix) || FIRST_PERSON.test(prefix);
+// "I want to build a parser", "let me write the code myself": the verb is the user's own only
+// when "I" or "we" is its subject, right before it. "I give up, write it" is still an order.
+const ADVERB = '(\\s+(really|first|still|just|also|probably|then|actually))?';
+const AUX = '(\\s+(want|wanted|need|needed|have|plan|try|tried|would\\s+like|am\\s+going|are\\s+going|will|would|can|could|' +
+  'should|must|might|shall)(\\s+to)?|\'ll|\'d(\\s+like\\s+to)?|\'m\\s+going\\s+to|\'re\\s+going\\s+to)';
+// Uppercase "I" may stand right before the verb; a lowercase "i" needs a helper verb, because
+// in Polish "i" means "and" ("przeczytaj i napisz").
+const SUBJECT_I = new RegExp(`(^|[^\\p{L}'])I${ADVERB}${AUX}?${ADVERB}\\s+$`, 'u');
+const SUBJECT_i = new RegExp(`(^|[^\\p{L}'])i${ADVERB}${AUX}${ADVERB}\\s+$`, 'iu');
+const SUBJECT_WE = new RegExp(`(^|[^\\p{L}'])(we${ADVERB}${AUX}?${ADVERB}|let\\s+me|let's|lemme)\\s+$`, 'iu');
+const firstPerson = (prefix) => SUBJECT_I.test(prefix) || SUBJECT_i.test(prefix) || SUBJECT_WE.test(prefix);
 
 // A sentence that asks for information, not for work. "Can you…/czy możesz…" stays a request.
 const QUESTION_START = new RegExp(
@@ -135,6 +145,7 @@ const MESSAGES = {
     hintLevel: '🧭 Podpowiedź {n}/{max} · {name}',
     hintMax: '🧭 Podpowiedź {max}/{max} · szkic (wyżej drabina nie sięga)',
     taskDone: '🧭 Zamknięte: {task} · podpowiedzi {n}/{max} · {min} min pracy',
+    taskDonePaused: ' · {lines} linii z pauzy (nie liczę jako Twoje)',
     noTask: '🧭 Brak otwartego zadania w tym repo.',
     bashAsk: 'Mentor: ta komenda wygląda na zapis do plików. Zgódź się tylko, jeśli to Twoja decyzja.',
     enabled: '🧭 Mentor włączony w tym repo.',
@@ -165,6 +176,7 @@ const MESSAGES = {
     hintLevel: '🧭 Hint {n}/{max} · {name}',
     hintMax: '🧭 Hint {max}/{max} · sketch (the ladder ends here)',
     taskDone: '🧭 Closed: {task} · hints {n}/{max} · {min} min of work',
+    taskDonePaused: ' · {lines} lines from a pause (not counted as yours)',
     noTask: '🧭 No open task in this repo.',
     bashAsk: 'Mentor: this command looks like it writes files. Allow it only if it is your call.',
     enabled: '🧭 Mentor enabled in this repo.',
@@ -236,12 +248,14 @@ function gate(cfg, flags = '') {
 }
 
 const POLITE_REQUEST = /^(can|could|would|will)\s+you\b|^(czy\s+)?(mo[zż]esz|m[oó]g[lł]by[sś]|mog[lł]aby[sś]|zrobisz|napiszesz|poprawisz|naprawisz)/iu;
-const FILLER = /^([\s"'„“(*_-]+|(a|i|no|ok|okej|dobra|so|and|but|ok so)[,\s]+)+/iu;
+// Leading fillers. The Polish "i" (and) only in lowercase: "I am tired…" is not "i" + "am…?".
+const FILLER = /^([\s"'„“(*_-]+|(a|no|ok|okej|dobra|so|and|but|ok so)[,\s]+)+/iu;
+const stripFiller = (s) => s.replace(FILLER, '').replace(/^i[,\s]+/u, '').replace(FILLER, '');
 
 // An information question ("how do I fix this?", "czy powinienem dopisać test?"), as opposed to
 // a request phrased as a question ("can you write it?") or an order with a question mark.
 function isQuestion(sentence, re) {
-  const s = sentence.trim().replace(FILLER, '');
+  const s = stripFiller(sentence.trim());
   if (POLITE_REQUEST.test(s)) return false;
   if (QUESTION_START.test(s)) return true;
   if (!/\?\s*$/.test(s)) return false;
@@ -254,7 +268,10 @@ function isQuestion(sentence, re) {
 function asksForCode(cfg, prompt) {
   const re = gate(cfg);
   const all = gate(cfg, 'g');
-  const sentences = stripPasted(prompt).split(/(?<=[.!?…])\s+|\n+/).filter((s) => s.trim());
+  // Clauses, not just sentences: "I give up, write it" and "I tried; now fix it" hold two.
+  const sentences = stripPasted(prompt)
+    .split(/(?<=[.!?…;,:])\s+|\n+|\s+(?=(but|so|ale|wi[eę]c|tylko)\s)/iu)
+    .filter((s) => s && s.trim() && !/^(but|so|ale|wi[eę]c|tylko)$/iu.test(s.trim()));
   return sentences.some((s) => {
     if (!re.test(s) || isQuestion(s, re)) return false;
     return [...s.matchAll(all)].some((m) => !firstPerson(s.slice(0, m.index)));
@@ -459,13 +476,51 @@ function isActive(cfg, proj, state) {
   return isEnabled(cfg, proj, state) && !isPaused(state);
 }
 
+// Starts a pause. The user's work so far stays theirs (it opens the gate if it is enough), and a
+// snapshot marks where the pause began, so what appears during it is told apart later.
+function startPause(proj, cfg, state, reason, until) {
+  const task = state.task;
+  if (task && proj.git && !task.attempted && attemptLines(proj, cfg, task.attemptBaseline || task.baseline) >= cfg.minLines) {
+    task.attempted = true;
+  }
+  const baseline = (state.pause && state.pause.baseline) || (proj.git ? compact(snapshot(proj, cfg)) : null);
+  state.pause = { until, reason, baseline };
+}
+
+// Ends a pause (`/mentor:on`, or on its own when the time is up). Code that appeared during the
+// pause may be Claude's: it does not count as the user's attempt, and the task records it as
+// pausedWork so the review and the weekly stats do not credit it to the user.
+function endPause(proj, cfg, state, auto, now = Date.now()) {
+  const pause = state.pause;
+  state.pause = null;
+  let lines = 0;
+  let files = [];
+  if (proj.git) {
+    const fresh = compact(snapshot(proj, cfg));
+    if (pause && isCurrent(pause.baseline)) {
+      const d = diffSnapshots(pause.baseline, snapshot(proj, cfg, effectiveBase(proj, pause.baseline.base, pause.baseline.at).base));
+      lines = d.n;
+      files = d.files;
+    }
+    if (state.task) state.task.attemptBaseline = fresh;
+    for (const s of Object.values(state.sessions)) s.baseline = fresh;
+  }
+  const task = state.task;
+  if (task) {
+    task.lastActiveAt = auto ? Math.max(task.lastActiveAt || task.startedAt, pause.until) : now;
+    if (lines) {
+      task.pausedWork = (task.pausedWork || 0) + lines;
+      task.pausedFiles = [...new Set([...(task.pausedFiles || []), ...files])];
+    }
+  }
+  logEvent(proj, 'resume', { auto, pausedWork: lines, task: task ? task.title : null });
+}
+
 // Ends an expired pause. Returns true when the state changed.
-function expirePause(proj, state) {
+function expirePause(proj, state, cfg) {
   const pause = state.pause;
   if (!pause || Date.now() < pause.until) return false;
-  logEvent(proj, 'resume', { auto: true });
-  if (state.task) state.task.lastActiveAt = Math.max(state.task.lastActiveAt || state.task.startedAt, pause.until);
-  state.pause = null;
+  endPause(proj, cfg || config(), state, true);
   return true;
 }
 
@@ -637,19 +692,24 @@ function compact(snap) {
 
 const isCurrent = (baseline) => Boolean(baseline && baseline.v === SNAPSHOT_V);
 
-// Lines of code changed between two snapshots.
-function changedLines(before, now) {
+// Lines of code changed between two snapshots, and the files they are in.
+function diffSnapshots(before, now) {
   let n = 0;
+  const files = [];
   for (const f of new Set([...Object.keys(before.files), ...Object.keys(now.files)])) {
     const a = before.files[f];
     const b = now.files[f];
     if (a && b && a.h === b.h) continue;
     const na = a ? a.n : 0;
     const nb = b ? b.n : 0;
-    n += Math.abs(nb - na) || (na || nb ? 1 : 0); // same count, different lines: at least one changed
+    const d = Math.abs(nb - na) || (na || nb ? 1 : 0); // same count, different lines: at least one changed
+    if (d) files.push(f);
+    n += d;
   }
-  return n;
+  return { n, files };
 }
+
+const changedLines = (before, now) => diffSnapshots(before, now).n;
 
 function attemptLines(proj, cfg, baseline) {
   const now = snapshot(proj, cfg, effectiveBase(proj, baseline.base, baseline.at).base);
@@ -658,7 +718,7 @@ function attemptLines(proj, cfg, baseline) {
 
 // The review material for /mentor:done: files changed since the task started, a stat first,
 // then whole files' diffs (new files included) until the budget runs out. null outside git.
-function reviewDiff(proj, cfg, baseline) {
+function reviewDiff(proj, cfg, baseline, pausedFiles = []) {
   if (!proj.git) return null;
   const status = git(proj.dir, ['status', '--short', '-uall']).trim();
   const eb = effectiveBase(proj, baseline && baseline.base, baseline && baseline.at);
@@ -671,7 +731,8 @@ function reviewDiff(proj, cfg, baseline) {
   const reverted = Object.keys(before).filter((f) => !count.files[f] && before[f].n > 0);
   const stat = changed.map((f) => {
     const v = now.files[f];
-    return `  ${f} | +${v.added} -${v.deleted}${v.untracked ? ' (new, untracked)' : ''}${v.note ? ` (${v.note})` : ''}`;
+    return `  ${f} | +${v.added} -${v.deleted}${v.untracked ? ' (new, untracked)' : ''}${v.note ? ` (${v.note})` : ''}` +
+      (pausedFiles.includes(f) ? ' (changed during a pause: may be Claude\'s work, not the user\'s)' : '');
   });
   for (const f of reverted) stat.push(`  ${f} | changes from before the task were reverted`);
 
@@ -777,15 +838,19 @@ function stats(days) {
   const done = events.filter((e) => e.type === 'task_done');
   const pauses = events.filter((e) => e.type === 'pause');
   const chat = events.filter((e) => e.type === 'code_in_chat');
+  // A task with code from a pause is not counted at any hint level: part of it may be Claude's.
+  const withPause = done.filter((e) => e.pausedWork > 0);
   const byLevel = [0, 0, 0, 0, 0];
-  for (const e of done) byLevel[Math.min(MAX_HINT, e.hint || 0)]++;
+  for (const e of done) if (!(e.pausedWork > 0)) byLevel[Math.min(MAX_HINT, e.hint || 0)]++;
   const count = (type) => events.filter((e) => e.type === type).length;
   const workMinutes = done.reduce((sum, d) => sum + (d.minutes || 0), 0);
   const lines = [
     `[mentor] Stats for the last ${days} days (from ${EVENTS_FILE}):`,
     `- tasks started: ${count('task_start')}, closed: ${done.length}, work time on closed tasks: ${workMinutes} min`,
-    `- closed tasks by highest hint level: ` +
+    `- closed tasks by highest hint level (without work from pauses): ` +
       byLevel.map((n, i) => `${i} ${LEVELS.en[i]}: ${n}`).join(', '),
+    `- closed with code written during a pause (not counted above): ${withPause.length}` +
+      (withPause.length ? ` (${withPause.map((e) => `"${e.title}" ${e.pausedWork} lines`).join(', ')})` : ''),
     `- hints requested: ${count('hint')}`,
     `- attempts described with /mentor:try: ${count('try')}`,
     `- "ready-made code" prompts stopped by the gate: ${count('gate_block')}`,
@@ -869,7 +934,8 @@ module.exports = {
   DATA_DIR, EVENTS_FILE, LEARNING_FILE, MARKER, EMPTY_TREE, MAX_HINT, IDLE_MS, LEVELS, LEVEL_SCOPE, DEFAULT_GATE,
   PAUSES_BEFORE_LONG_REASON, LONG_REASON,
   config, gate, asksForCode, isQuestion, stripPasted, t, levelName, readInput, git, gitTry, project, loadState, saveState,
-  lockState, logEvent, logError, pruneEvents, isEnabled, isPaused, isActive, expirePause, touchTask, fmtTime, localDate,
+  lockState, logEvent, logError, pruneEvents, isEnabled, isPaused, isActive, startPause, endPause, expirePause, touchTask,
+  fmtTime, localDate,
   headCommit, snapshot, compact, isCurrent, changedLines, attemptLines, effectiveBase, reviewDiff, hasSessionBaseline,
   sessionBaseline, statusLine, readEvents, pausesToday, stats, dueRepeats, appendLearning, respond, blockPrompt,
 };

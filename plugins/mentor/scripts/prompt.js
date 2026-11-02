@@ -83,12 +83,16 @@ function handleCommand(ctx, name, args) {
       if (!task) return context('[mentor] /mentor:done was typed, but no task is open in this project.', lib.t(cfg, 'noTask'));
       const minutes = Math.round((task.activeMs || 0) / 60000);
       const wallMinutes = Math.round((now - task.startedAt) / 60000);
-      const review = lib.reviewDiff(proj, cfg, task.baseline);
+      const review = lib.reviewDiff(proj, cfg, task.baseline, task.pausedFiles || []);
       const changed = review ? review.stat !== '' : null;
-      lib.logEvent(proj, 'task_done', { title: task.title, hint: task.hint, minutes, wallMinutes, changed, learned: args || '' });
+      const pausedWork = task.pausedWork || 0;
+      lib.logEvent(proj, 'task_done', {
+        title: task.title, hint: task.hint, minutes, wallMinutes, changed, pausedWork, learned: args || '',
+      });
       lib.appendLearning(
         `## ${lib.localDate(now)} — ${task.title}\n` +
         `- hints: ${task.hint}/${lib.MAX_HINT} (${lib.LEVELS.en[task.hint]}) · ${minutes} min of work\n` +
+        (pausedWork ? `- ${pausedWork} lines changed during a pause (normal mode), not counted as mine\n` : '') +
         (args ? `- in my words: ${args}\n` : ''));
       state.task = null;
       save();
@@ -98,7 +102,12 @@ function handleCommand(ctx, name, args) {
         `(${lib.LEVELS.en[task.hint]}). Work time: ${minutes} min (open for ${wallMinutes} min). ` +
         `Repo changed since the task started: ${changedText}. ` +
         `User's own summary: ${args ? `"${args}"` : 'none given'}. An entry was appended to the learning journal ${lib.LEARNING_FILE}. ` +
-        `Today is ${lib.localDate(now)}.`;
+        `Today is ${lib.localDate(now)}.` +
+        (pausedWork
+          ? ` ${pausedWork} lines in ${task.pausedFiles.join(', ')} changed while mentor mode was paused, when you may have ` +
+            'written code yourself. Do not review that part as the user\'s work, and do not call the task done alone; ' +
+            'ask the user which parts are theirs.'
+          : '');
       if (review) {
         const base = review.base === lib.EMPTY_TREE
           ? 'the empty tree (no commits yet)'
@@ -112,7 +121,8 @@ function handleCommand(ctx, name, args) {
             `Run git diff ${review.base.slice(0, 7)} -- <file> (or read the file, if untracked) for these.`;
         }
       }
-      return context(text, lib.t(cfg, 'taskDone', { task: task.title, n: task.hint, min: minutes }));
+      return context(text, lib.t(cfg, 'taskDone', { task: task.title, n: task.hint, min: minutes }) +
+        (pausedWork ? lib.t(cfg, 'taskDonePaused', { lines: pausedWork }) : ''));
     }
 
     case 'off': {
@@ -122,18 +132,14 @@ function handleCommand(ctx, name, args) {
         lib.blockPrompt(lib.t(cfg, 'offNeedsLonger', { n: today + 1, need: lib.LONG_REASON }));
       }
       const until = now + cfg.offMinutes * 60000;
-      state.pause = { until, reason: args };
+      lib.startPause(proj, cfg, state, args, until);
       lib.logEvent(proj, 'pause', { reason: args, minutes: cfg.offMinutes, task: task ? task.title : null, today: today + 1 });
       save();
       return context(lib.statusLine(cfg, proj, state), lib.t(cfg, 'paused', { time: lib.fmtTime(cfg, until), reason: args }));
     }
 
     case 'on': {
-      if (paused) {
-        lib.logEvent(proj, 'resume', { auto: false });
-        state.pause = null;
-        if (task) task.lastActiveAt = now;
-      }
+      if (paused) lib.endPause(proj, cfg, state, false, now);
       save();
       return context(lib.statusLine(cfg, proj, state), lib.t(cfg, paused ? 'resumed' : 'alreadyActive'));
     }
@@ -183,7 +189,7 @@ function attempt(ctx) {
   const task = state.task;
   if (task && task.attempted) return { ok: true };
   const session = state.sessions[input.session_id || 'default'];
-  const baseline = task ? task.baseline : session && session.baseline;
+  const baseline = task ? task.attemptBaseline || task.baseline : session && session.baseline;
   if (!baseline) return { ok: true };
   const n = lib.attemptLines(proj, cfg, baseline);
   return { ok: n >= cfg.minLines, n };
@@ -198,7 +204,7 @@ function main() {
   const state = lib.loadState(proj);
   const now = Date.now();
   const ctx = { cfg, proj, state, input, now };
-  let changed = lib.expirePause(proj, state);
+  let changed = lib.expirePause(proj, state, cfg);
 
   const cmd = prompt.match(COMMAND);
   if (cmd) return handleCommand(ctx, cmd[1].toLowerCase(), cmd[2].trim());

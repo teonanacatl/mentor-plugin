@@ -809,3 +809,77 @@ test('a stale state lock does not block a prompt', () => {
   assert.match(ctx(s.prompt('co dalej?')), /task: "lock"/);
   assert.ok(!fs.existsSync(lock), 'the lock is released after the prompt');
 });
+
+// --- 0.5.0 ---
+
+test('code written during a pause is not the user\'s attempt and is reported apart', () => {
+  const s = setup();
+  s.prompt('/mentor:task parser');
+  s.prompt('/mentor:off normalny tryb na chwilę');
+  s.append('parser.js', lines(12, 'written by Claude in the pause'));
+  s.prompt('/mentor:on');
+  assert.strictEqual(s.prompt('napisz resztę').code, 2, 'the gate stays closed after the pause');
+  s.append('app.js', lines(3, 'mine'));
+  assert.strictEqual(s.prompt('napisz resztę').code, 0, 'own work after the pause opens it');
+
+  const done = s.prompt('/mentor:done');
+  assert.match(done.json.systemMessage, /12 linii z pauzy/);
+  assert.match(ctx(done), /12 lines in parser\.js changed while mentor mode was paused/);
+  assert.match(ctx(done), /parser\.js \| \+12 -0 \(new, untracked\) \(changed during a pause/);
+  assert.match(fs.readFileSync(path.join(s.data, 'LEARNING.md'), 'utf8'), /12 lines changed during a pause/);
+  const review = ctx(s.prompt('/mentor:review-week'));
+  assert.match(review, /hint level \(without work from pauses\): 0 none: 0/);
+  assert.match(review, /closed with code written during a pause \(not counted above\): 1 \("parser" 12 lines\)/);
+});
+
+test('work before a pause still counts; commits made in the pause do not', () => {
+  const s = setup();
+  s.prompt('/mentor:task przed pauzą');
+  s.append('app.js', lines(4, 'mine before'));
+  s.prompt('/mentor:off hotfix gdzie indziej');
+  s.append('claude.js', lines(10, 'pause'));
+  commit(s.repo, 'committed in the pause');
+  const st = s.state();
+  st.pause.until = Date.now() - 1000; // the pause runs out on its own
+  s.writeState(st);
+  assert.strictEqual(s.prompt('napisz resztę').code, 0, 'the earlier attempt keeps the gate open');
+  assert.strictEqual(s.state().task.pausedWork, 10);
+  assert.ok(s.events().some((e) => e.type === 'resume' && e.auto && e.pausedWork === 10));
+});
+
+test('the subject must stand right before the verb', () => {
+  const s = setup();
+  for (const p of ['I give up, write the code for me', 'I am tired, just write the function.', 'If I paste the error, can you fix it',
+    '* write the parser for me', 'I tried; now fix it', 'I am tired and just write the function', 'wyślij mi kod', 'send me the code',
+    'przeczytaj i napisz ten parser']) {
+    assert.strictEqual(s.prompt(p).code, 2, `should block: ${p}`);
+  }
+  for (const p of ['I will write the tests myself', 'i want to build a parser', "I'm going to refactor this module myself",
+    '/* fix it later */ what does this do?', 'Am I supposed to add the missing check here?']) {
+    assert.strictEqual(s.prompt(p).code, 0, `should pass: ${p}`);
+  }
+});
+
+test('MCP: remote ids and URLs are not local files', () => {
+  const s = setup();
+  assert.strictEqual(s.tool('mcp__Google_Drive__update_file', { fileId: '1AbCdEf', content: 'x' }).stdout, '');
+  assert.strictEqual(s.tool('mcp__x__save_bookmark', { uri: 'https://example.com/a' }).stdout, '');
+  assert.strictEqual(s.tool('mcp__docs__create_document', { title: 'Notes', folderId: 'abc' }).stdout, '');
+  assert.strictEqual(s.decision('mcp__fs__write_file', { path: 'file://' + path.join(s.repo, 'app.js') }), 'deny');
+  assert.strictEqual(s.decision('mcp__fs__write_files', { paths: ['src/a.js', 'src/b.js'] }), 'deny');
+  assert.strictEqual(s.decision('mcp__fs__edit_file', { path: 'app.js' }), 'deny', 'a bare file name is still a file');
+});
+
+test("a project's .claude/ is team work: free in a pause, logged; settings and the marker stay protected", () => {
+  const s = setup();
+  s.prompt('/mentor:off wspólne komendy zespołu');
+  for (const cmd of ['mkdir -p .claude/commands', 'git add .claude/commands/review.md && git commit -m "review command"',
+    'git add .mentor && git commit -m "mentor on for this repo"', 'ls .claude/agents']) {
+    assert.strictEqual(s.tool('Bash', { command: cmd }).stdout, '', `should pass: ${cmd}`);
+  }
+  for (const cmd of ["sed -i 's/x/y/' .claude/settings.json", 'cd .claude && echo {} > settings.local.json', 'git rm .mentor',
+    'rm ~/.claude/settings.json']) {
+    assert.strictEqual(s.decision('Bash', { command: cmd }), 'deny', `should deny: ${cmd}`);
+  }
+  assert.strictEqual(s.events().filter((e) => e.type === 'persist_write').length, 2, 'mkdir and git add of .claude/commands');
+});
