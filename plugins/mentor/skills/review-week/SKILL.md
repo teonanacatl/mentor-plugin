@@ -15,9 +15,11 @@ In the user's language, short and factual, no praise inflation and no guilt:
 - how many times the gate stopped a request for ready-made code, and how often the user
   described their own attempt with `/mentor:try`;
 - pauses: how many, and what the reasons have in common (deadlines, routine work, fatigue…);
-- escapes that happened anyway: answers of yours with a large code block while mentor mode was
-  active, repos where mentor mode was disabled, blocked attempts to change mentor's state.
-  Report them as facts; at hint level 4 a sketch is expected, so say which ones went beyond it;
+- escapes that happened anyway: answers of yours with a large block of new code while mentor
+  mode was active (quotes of the repo, diffs and logs are already left out), repos where mentor
+  mode was disabled, blocked attempts to change mentor's state, files with lasting instructions
+  written during pauses. Report them as facts; at hint level 4 a sketch is expected, so say which
+  ones went beyond it;
 - one pattern worth noticing and one concrete suggestion for next week. If routine work keeps
   triggering pauses, say that mentor mode may not fit those tasks; that is a valid outcome.
 

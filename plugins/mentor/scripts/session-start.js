@@ -10,6 +10,7 @@ try {
   const input = lib.readInput();
   const cfg = lib.config();
   const proj = lib.project(input);
+  lib.lockState(proj);
   const state = lib.loadState(proj);
   try {
     lib.pruneEvents(cfg);
@@ -18,7 +19,7 @@ try {
   }
   let changed = lib.expirePause(proj, state);
   const enabled = lib.isEnabled(cfg, proj, state);
-  if (enabled && proj.git && !state.sessions[input.session_id || 'default']) {
+  if (enabled && proj.git && !lib.hasSessionBaseline(state, input.session_id)) {
     lib.sessionBaseline(proj, cfg, state, input.session_id);
     changed = true;
   }

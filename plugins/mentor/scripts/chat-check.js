@@ -4,6 +4,8 @@
 // to the weekly review. It never blocks.
 
 const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const lib = require('./lib');
 
 const TRANSCRIPT_TAIL = 1024 * 1024;
@@ -46,21 +48,49 @@ function fromTranscript(file) {
   return parts.join('\n');
 }
 
-// Lines inside fenced code blocks.
-function codeLines(text) {
+// Blocks that show rather than hand over: diffs, logs, terminal output and commands.
+const SHOWN = /^(diff|patch|text|txt|plain|plaintext|console|log|logs|output|sh|bash|zsh|shell|powershell|ps|ps1|pwsh|cmd|bat)$/i;
+
+// Non-empty lines inside fenced code blocks, without the blocks that only show something.
+function codeBlockLines(text) {
   let inside = false;
   let fence = '';
-  let n = 0;
+  let counted = false;
+  const out = [];
   for (const line of String(text).split('\n')) {
-    const m = line.match(/^\s*(```+|~~~+)/);
+    const m = line.match(/^\s*(```+|~~~+)\s*([\w+-]*)/);
     if (m && (!inside || m[1][0] === fence[0])) {
       inside = !inside;
       fence = m[1];
+      counted = inside && !SHOWN.test(m[2]);
       continue;
     }
-    if (inside && line.trim()) n++;
+    if (inside && counted && line.trim()) out.push(line);
   }
-  return n;
+  return out;
+}
+
+const codeLines = (text) => codeBlockLines(text).length;
+
+// Lines that are already in the repository are quotes of the user's code, not new code.
+// Short lines (braces, `return;`) prove nothing either way and are not counted.
+function newCodeLines(proj, lines) {
+  const candidates = [...new Set(lines.map((l) => l.trim()).filter((l) => l.replace(/\s/g, '').length >= 4))];
+  if (!candidates.length || !proj.git) return candidates.length;
+  const patterns = path.join(os.tmpdir(), `mentor-grep-${process.pid}.txt`);
+  let found = new Set();
+  try {
+    fs.writeFileSync(patterns, candidates.join('\n') + '\n');
+    const out = lib.gitTry(proj.dir, ['grep', '-h', '-o', '-I', '-F', '--untracked', '-f', patterns]);
+    found = new Set(out.split('\n').map((l) => l.trim()));
+  } finally {
+    try {
+      fs.unlinkSync(patterns);
+    } catch {
+      // already gone
+    }
+  }
+  return candidates.filter((l) => !found.has(l)).length;
 }
 
 function main() {
@@ -73,7 +103,8 @@ function main() {
 
   const last = input.last_assistant_message;
   const text = typeof last === 'string' ? last : last ? textOf(last.content || last) : fromTranscript(input.transcript_path);
-  const lines = codeLines(text);
+  const block = codeBlockLines(text);
+  const lines = block.length >= cfg.chatCodeLines ? newCodeLines(proj, block) : 0;
   if (lines >= cfg.chatCodeLines) {
     const task = state.task;
     lib.logEvent(proj, 'code_in_chat', { lines, hint: task ? task.hint : 0, task: task ? task.title : null });
@@ -90,4 +121,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { codeLines, fromTranscript };
+module.exports = { codeLines, codeBlockLines, fromTranscript };

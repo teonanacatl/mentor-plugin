@@ -28,6 +28,10 @@ const PAUSES_BEFORE_LONG_REASON = 2;
 const LONG_REASON = 40;
 // git's well-known empty tree, the diff base for a repository without commits.
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+// Bumped when the way snapshots are hashed changes; older baselines are taken again.
+const SNAPSHOT_V = 2;
+const LOCK_WAIT_MS = 2000;
+const LOCK_STALE_MS = 10000;
 
 const LEVELS = {
   en: ['none', 'direction', 'concept', 'API', 'sketch'],
@@ -42,12 +46,14 @@ const LEVEL_SCOPE = [
   'sketch: a skeleton or pseudocode with the key lines left as TODO for the user, never a complete working solution',
 ];
 
-// Generated files, lock files and build output do not count as the user's attempt and stay out of the review diff.
+// Generated files, lock files and build output do not count as the user's attempt and stay out of
+// the review diff. gitignore-like: a leading "/" (or a slash inside) anchors at the repo root, so
+// /build/ skips the build output but not scripts/build/. Ignored files are left out by git anyway.
 const DEFAULT_IGNORE = [
   'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb', 'Cargo.lock',
   'poetry.lock', 'Pipfile.lock', 'composer.lock', 'Gemfile.lock', 'go.sum',
-  'dist/', 'build/', 'out/', 'coverage/', 'node_modules/', '.next/', '.nuxt/', '.angular/', '.cache/',
-  'target/', '__pycache__/', '.nyc_output/', '.pytest_cache/', '.turbo/',
+  '/dist/', '/build/', '/out/', '/coverage/', '/target/',
+  'node_modules/', '.next/', '.nuxt/', '.angular/', '.cache/', '__pycache__/', '.nyc_output/', '.pytest_cache/', '.turbo/',
   '*.log', '*.map', '*.min.js', '*.pyc', '.DS_Store', MARKER,
 ];
 
@@ -66,18 +72,42 @@ const DEFAULT_GATE = [
   `${B}(mo[zż]esz|m[oó]g[lł]by[sś]|mog[lł]aby[sś])\\s+(mi\\s+)?(to\\s+)?(napisa[cć]|zaimplementowa[cć]|naprawi[cć]|poprawi[cć]|` +
     `dopisa[cć]|stworzy[cć]|doko[nń]czy[cć]|zrobi[cć]|rozwi[aą]za[cć]|doda[cć]|przerobi[cć]|zrefaktoryzowa[cć])${E}`,
   `${B}(napiszesz|naprawisz|poprawisz|zrobisz|dopiszesz)\\s+(mi|to)${E}`,
-  `${B}(write|create|build|add|implement|refactor|complete|generate|code)\\s+(me\\s+)?` +
+  `${B}zmie[nń]\\s+(mi\\s+)?(to|ten|t[eę]|tego|go|j[aą])${E}`,
+  `${B}zr[oó]b\\s+reszt[eę]${E}`,
+  `${B}potrzebuj[eę]\\s+(gotowego|gotowy|ca[lł]ego|ca[lł]y)\\s+(kodu|kod|rozwi[aą]zania|rozwi[aą]zanie)${E}`,
+  `${B}(write|create|build|add|implement|refactor|rewrite|complete|generate|code|convert|change|update|make)\\s+(me\\s+)?` +
     `(it|this|that|the|a|an|my|some|missing|new|up|these|those)${E}`,
   `${B}code\\s+(it|this|that)\\s+up${E}`,
-  `${B}give\\s+me\\s+(the\\s+)?(code|solution|implementation|fix)${E}`,
+  `${B}give\\s+me\\s+(the\\s+|a\\s+|an\\s+)?(\\w+\\s+)?(code|solution|implementation|fix|function|class|component|method|script|snippet|test)${E}`,
   `${B}show\\s+me\\s+(the\\s+)?(solution|implementation|fixed\\s+code|full\\s+code|complete\\s+code)${E}`,
   `${B}(fix|solve|finish)\\s+(it|this|that)${E}`,
-  `${B}just\\s+do\\s+it${E}`,
+  `${B}(do|finish|write)\\s+the\\s+rest${E}`,
+  `${B}make\\s+it\\s+work${E}`,
+  `${B}(just|please)\\s+do\\s+it${E}`,
+  `${B}do\\s+it\\s+for\\s+me${E}`,
 ].join('|');
+
+// What the user pasted is not what they ask for: fenced and indented code, quotes, comment lines
+// and inline code are removed before the gate looks at the prompt.
+function stripPasted(prompt) {
+  return prompt
+    .replace(/^\s*(```|~~~)[\s\S]*?^\s*\1[^\n]*$/gm, ' ')
+    .replace(/^\s*(```|~~~)[\s\S]*$/m, ' ') // an unclosed fence runs to the end
+    .replace(/`[^`\n]*`/g, ' ')
+    .split('\n')
+    .filter((line) => !/^(\s{4,}|\t)\S/.test(line) && !/^\s*(>|\/\/|#|\/\*|\*|--\s)/.test(line))
+    .join('\n');
+}
+
+// "I want to build a parser", "let me write the code myself": the user describes their own work.
+const FIRST_PERSON_I = /(^|[^\p{L}])I(?![\p{L}])/u; // uppercase only: Polish "i" means "and"
+const FIRST_PERSON = /(^|[^\p{L}])(i'll|i'd|i'm|i've|we|we'll|we're|we've|let\s+me|let's|lemme)(?![\p{L}])/iu;
+const firstPerson = (prefix) => FIRST_PERSON_I.test(prefix) || FIRST_PERSON.test(prefix);
 
 // A sentence that asks for information, not for work. "Can you…/czy możesz…" stays a request.
 const QUESTION_START = new RegExp(
-  `^(how|what|why|when|where|which|who|whose|is|are|was|does|do|did|should|shall|am)${E}(?!\\s+you${E})|` +
+  `^(how|what|why|when|where|which|who|whose|is|are|was|should|shall|am)${E}(?!\\s+you${E})|` +
+  `^(do|does|did)\\s+(i|we|they|it|this|that|these|those|people|my)${E}|` +
   `^(jak|jaki|jaka|jakie|co|czemu|dlaczego|gdzie|kiedy|kt[oó]ry|kt[oó]ra|kt[oó]re|ile|po\\s+co)${E}|` +
   `^czy${E}(?!\\s+(mo[zż]esz|m[oó]g[lł]by[sś]|mog[lł]aby[sś]|dasz\\s+rad[eę]|zrobisz|napiszesz|poprawisz|naprawisz))`,
   'iu');
@@ -194,15 +224,15 @@ function config() {
 }
 
 // The user's own pattern is compiled without the `u` flag, so plain regexes keep working.
-function gate(cfg) {
+function gate(cfg, flags = '') {
   if (cfg.gateRegex) {
     try {
-      return new RegExp(cfg.gateRegex, 'i');
+      return new RegExp(cfg.gateRegex, 'i' + flags);
     } catch (err) {
       logError('gate_regex', err);
     }
   }
-  return new RegExp(DEFAULT_GATE, 'iu');
+  return new RegExp(DEFAULT_GATE, 'iu' + flags);
 }
 
 const POLITE_REQUEST = /^(can|could|would|will)\s+you\b|^(czy\s+)?(mo[zż]esz|m[oó]g[lł]by[sś]|mog[lł]aby[sś]|zrobisz|napiszesz|poprawisz|naprawisz)/iu;
@@ -219,11 +249,16 @@ function isQuestion(sentence, re) {
   return Boolean(m && m.index > 0); // "napisz to?" starts with the order itself
 }
 
-// True when some sentence of the prompt asks Claude to do the work.
+// True when some sentence of the prompt asks Claude to do the work. A match counts unless the
+// sentence is an information question or the verb belongs to the user ("I need to implement…").
 function asksForCode(cfg, prompt) {
   const re = gate(cfg);
-  const sentences = prompt.split(/(?<=[.!?…])\s+|\n+/).filter((s) => s.trim());
-  return sentences.some((s) => re.test(s) && !isQuestion(s, re));
+  const all = gate(cfg, 'g');
+  const sentences = stripPasted(prompt).split(/(?<=[.!?…])\s+|\n+/).filter((s) => s.trim());
+  return sentences.some((s) => {
+    if (!re.test(s) || isQuestion(s, re)) return false;
+    return [...s.matchAll(all)].some((m) => !firstPerson(s.slice(0, m.index)));
+  });
 }
 
 function t(cfg, key, vars = {}) {
@@ -328,9 +363,65 @@ function logError(where, err) {
   }
 }
 
+const pad = (n) => String(n).padStart(2, '0');
+
+// Dates the user sees and Leitner due dates are local, not UTC: between midnight and 1–2 a.m. in
+// Poland toISOString() still says yesterday.
+function localDate(ms = Date.now()) {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function localDateTime(ms) {
+  const d = new Date(ms);
+  return `${localDate(ms)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// Serialises read-modify-write of one project's state between sessions in the same repo.
+// Never blocks for long: after LOCK_WAIT_MS it goes on without the lock rather than hang a prompt.
+function lockState(proj) {
+  const file = stateFile(proj) + '.lock';
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  try {
+    ensureDir(STATE_DIR);
+  } catch {
+    return () => {};
+  }
+  for (;;) {
+    try {
+      fs.writeFileSync(file, String(process.pid), { flag: 'wx' });
+      break;
+    } catch (err) {
+      if (err.code !== 'EEXIST') return () => {};
+      try {
+        if (Date.now() - fs.statSync(file).mtimeMs > LOCK_STALE_MS) {
+          fs.unlinkSync(file);
+          continue;
+        }
+      } catch {
+        continue; // released in the meantime
+      }
+      if (Date.now() > deadline) return () => {};
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
+  }
+  let held = true;
+  const release = () => {
+    if (!held) return;
+    held = false;
+    try {
+      fs.unlinkSync(file);
+    } catch {
+      // already gone
+    }
+  };
+  process.on('exit', release); // respond() and blockPrompt() end the process directly
+  return release;
+}
+
 // Drops events older than keep_days, at most once a day.
 function pruneEvents(cfg, now = Date.now()) {
-  const today = new Date(now).toISOString().slice(0, 10);
+  const today = localDate(now);
   try {
     if (fs.readFileSync(PRUNE_STAMP, 'utf8').trim() === today) return;
   } catch {
@@ -398,10 +489,59 @@ function headCommit(dir) {
   }
 }
 
+function gitTry(dir, args) {
+  try {
+    return git(dir, args);
+  } catch {
+    return '';
+  }
+}
+
+function isAncestor(dir, a, b) {
+  try {
+    git(dir, ['merge-base', '--is-ancestor', a, b]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// The commit to compare against. Starts as the task's (or session's) starting commit, but work
+// that came from elsewhere is not the user's attempt: after a branch switch or rebase it moves to
+// the merge base, and past the newest merge, commit by another author or commit made before the
+// task started (`since`, ms) it moves to that commit.
+function effectiveBase(proj, base, since = 0) {
+  const dir = proj.dir;
+  const head = headCommit(dir);
+  if (!base || base === EMPTY_TREE || !head || head === base) return { base, note: null };
+  let start = base;
+  let note = null;
+  if (!isAncestor(dir, base, head)) {
+    start = gitTry(dir, ['merge-base', base, head]).trim() || head;
+    note = 'HEAD no longer descends from the starting commit (branch switch or rebase)';
+  }
+  if (start === head) return { base: head, note };
+  const email = gitTry(dir, ['config', 'user.email']).trim().toLowerCase();
+  for (const line of gitTry(dir, ['log', '--format=%H%x09%ae%x09%ct%x09%P', `${start}..${head}`]).split('\n')) {
+    if (!line.trim()) continue; // newest first
+    const [sha, author, time, parents] = line.split('\t');
+    const merge = (parents || '').trim().split(/\s+/).length > 1;
+    const foreign = email && author.toLowerCase() !== email;
+    const older = since && Number(time) * 1000 < since - 1000;
+    if (merge || foreign || older) {
+      const why = merge ? 'a merge' : foreign ? `a commit by ${author}` : 'a commit from before the task';
+      return { base: sha, note: (note ? note + '; ' : '') + `${why} came in, so only changes after ${sha.slice(0, 7)} count` };
+    }
+  }
+  return { base: start, note };
+}
+
+// gitignore-like: a leading "/" or a slash inside anchors the pattern at the repo root.
 function pathspecs(cfg) {
   const globs = [...DEFAULT_IGNORE, ...cfg.ignore].map((p) => {
+    const anchored = p.startsWith('/') || p.replace(/\/$/, '').includes('/');
     const g = p.replace(/^\.?\//, '');
-    return g.endsWith('/') ? `:(exclude,glob)**/${g}**` : `:(exclude,glob)**/${g}`;
+    return `:(exclude,glob)${anchored ? '' : '**/'}${g.endsWith('/') ? g + '**' : g}`;
   });
   return ['.', ...globs];
 }
@@ -419,11 +559,16 @@ function splitDiff(diff) {
     file = file.replace(/\t$/, '');
     let added = 0;
     let deleted = 0;
+    const changed = [];
     for (const line of text.split('\n')) {
-      if (line.startsWith('+') && !line.startsWith('+++')) added++;
-      else if (line.startsWith('-') && !line.startsWith('---')) deleted++;
+      if (line.startsWith('+++') || line.startsWith('---')) continue;
+      if (line.startsWith('+')) added++;
+      else if (line.startsWith('-')) deleted++;
+      else continue;
+      changed.push(line);
     }
-    files.push({ file, text, added, deleted });
+    // Hashing only the changed lines keeps the hash stable when other changes shift line numbers.
+    files.push({ file, text, added, deleted, h: sha1(changed.join('\n')) });
   }
   return files;
 }
@@ -451,29 +596,33 @@ function readUntracked(dir, rel) {
     if (buf.subarray(0, 8000).includes(0)) return { h: sha1(buf), added: 1, text: null, note: `binary, ${st.size} bytes` };
     const text = buf.toString('utf8');
     const lines = text === '' ? 0 : text.split('\n').length - (text.endsWith('\n') ? 1 : 0);
-    return { h: sha1(buf), added: lines, text };
+    const code = text.split('\n').filter((l) => /\S/.test(l)).length; // blank lines are not an attempt
+    return { h: sha1(buf), added: lines, code, text };
   } catch {
     return null; // vanished between status and read
   }
 }
 
 // Per-file picture of every change against `base` (a commit; the task's or session's start),
-// tracked and untracked, without generated files. null outside git.
-function snapshot(proj, cfg, base) {
+// tracked and untracked, without generated files. null outside git. For counting (the default)
+// whitespace and blank lines are ignored, so reformatting or empty lines are not an attempt;
+// `review` keeps the plain diff for the eyes of the reviewer.
+function snapshot(proj, cfg, base, review = false) {
   if (!proj.git) return null;
   const from = base || headCommit(proj.dir) || EMPTY_TREE;
   const specs = pathspecs(cfg);
+  const args = ['diff', '--no-color', '--no-ext-diff', ...(review ? [] : ['-w', '--ignore-blank-lines'])];
   let diff;
   try {
-    diff = git(proj.dir, ['diff', '--no-color', '--no-ext-diff', from, '--', ...specs]);
+    diff = git(proj.dir, [...args, from, '--', ...specs]);
   } catch {
-    diff = git(proj.dir, ['diff', '--no-color', '--no-ext-diff', headCommit(proj.dir) || EMPTY_TREE, '--', ...specs]);
+    diff = git(proj.dir, [...args, headCommit(proj.dir) || EMPTY_TREE, '--', ...specs]);
   }
   const files = {};
-  for (const c of splitDiff(diff)) files[c.file] = { h: sha1(c.text), added: c.added, deleted: c.deleted, text: c.text };
+  for (const c of splitDiff(diff)) files[c.file] = { h: c.h, n: c.added + c.deleted, added: c.added, deleted: c.deleted, text: c.text };
   for (const rel of untrackedFiles(proj.dir, specs)) {
     const u = readUntracked(proj.dir, rel);
-    if (u) files[rel] = { h: u.h, added: u.added, deleted: 0, untracked: true, text: u.text, note: u.note };
+    if (u) files[rel] = { h: u.h, n: u.code === undefined ? u.added : u.code, added: u.added, deleted: 0, untracked: true, text: u.text, note: u.note };
   }
   return { base: from, files };
 }
@@ -482,11 +631,13 @@ function snapshot(proj, cfg, base) {
 function compact(snap) {
   if (!snap) return null;
   const files = {};
-  for (const [f, v] of Object.entries(snap.files)) files[f] = { h: v.h, n: v.added + v.deleted };
-  return { base: snap.base, files };
+  for (const [f, v] of Object.entries(snap.files)) files[f] = { h: v.h, n: v.n };
+  return { v: SNAPSHOT_V, base: snap.base, at: Date.now(), files };
 }
 
-// Lines changed between two snapshots taken against the same base.
+const isCurrent = (baseline) => Boolean(baseline && baseline.v === SNAPSHOT_V);
+
+// Lines of code changed between two snapshots.
 function changedLines(before, now) {
   let n = 0;
   for (const f of new Set([...Object.keys(before.files), ...Object.keys(now.files)])) {
@@ -494,14 +645,14 @@ function changedLines(before, now) {
     const b = now.files[f];
     if (a && b && a.h === b.h) continue;
     const na = a ? a.n : 0;
-    const nb = b ? b.added + b.deleted : 0;
-    n += Math.max(1, Math.abs(nb - na));
+    const nb = b ? b.n : 0;
+    n += Math.abs(nb - na) || (na || nb ? 1 : 0); // same count, different lines: at least one changed
   }
   return n;
 }
 
 function attemptLines(proj, cfg, baseline) {
-  const now = snapshot(proj, cfg, baseline.base);
+  const now = snapshot(proj, cfg, effectiveBase(proj, baseline.base, baseline.at).base);
   return now ? changedLines(baseline, now) : Infinity;
 }
 
@@ -510,10 +661,14 @@ function attemptLines(proj, cfg, baseline) {
 function reviewDiff(proj, cfg, baseline) {
   if (!proj.git) return null;
   const status = git(proj.dir, ['status', '--short', '-uall']).trim();
-  const now = snapshot(proj, cfg, baseline && baseline.base);
+  const eb = effectiveBase(proj, baseline && baseline.base, baseline && baseline.at);
+  const count = snapshot(proj, cfg, eb.base);
+  const now = snapshot(proj, cfg, eb.base, true);
   const before = baseline ? baseline.files : {};
-  const changed = Object.keys(now.files).filter((f) => !before[f] || before[f].h !== now.files[f].h).sort();
-  const reverted = Object.keys(before).filter((f) => !now.files[f]);
+  const changed = Object.keys(count.files)
+    .filter((f) => (before[f] ? before[f].h !== count.files[f].h : count.files[f].n > 0) && now.files[f])
+    .sort();
+  const reverted = Object.keys(before).filter((f) => !count.files[f] && before[f].n > 0);
   const stat = changed.map((f) => {
     const v = now.files[f];
     return `  ${f} | +${v.added} -${v.deleted}${v.untracked ? ' (new, untracked)' : ''}${v.note ? ` (${v.note})` : ''}`;
@@ -540,6 +695,7 @@ function reviewDiff(proj, cfg, baseline) {
   }
   return {
     base: now.base,
+    note: eb.note,
     status,
     stat: stat.join('\n'),
     diff: parts.join('\n'),
@@ -547,10 +703,15 @@ function reviewDiff(proj, cfg, baseline) {
   };
 }
 
+const hasSessionBaseline = (state, sessionId) => {
+  const s = state.sessions[sessionId || 'default'];
+  return Boolean(s && isCurrent(s.baseline));
+};
+
 // Baseline of the current session: changes made before it do not count as an attempt.
 function sessionBaseline(proj, cfg, state, sessionId, now = Date.now()) {
   const id = sessionId || 'default';
-  if (state.sessions[id]) return state.sessions[id].baseline;
+  if (hasSessionBaseline(state, id)) return state.sessions[id].baseline;
   const baseline = compact(snapshot(proj, cfg));
   state.sessions[id] = { at: now, baseline };
   const ids = Object.keys(state.sessions).sort((a, b) => state.sessions[b].at - state.sessions[a].at);
@@ -629,16 +790,22 @@ function stats(days) {
     `- attempts described with /mentor:try: ${count('try')}`,
     `- "ready-made code" prompts stopped by the gate: ${count('gate_block')}`,
     `- file edits blocked: ${count('edit_block')}, attempts to change mentor's own state or settings blocked: ${count('tamper_block')}`,
-    `- answers with a large code block while mentor mode was active: ${chat.length}` +
+    `- answers with a large block of new code while mentor mode was active: ${chat.length}` +
       (chat.length ? ` (${chat.map((c) => `${c.lines} lines at hint ${c.hint}/${MAX_HINT}`).join(', ')})` : ''),
     `- what's-new checks: ${count('whats_new')}`,
     `- mentor mode disabled for a repo (/mentor:disable): ${count('disable')}`,
     `- pauses (/mentor:off): ${pauses.length}`,
   ];
-  for (const p of pauses) lines.push(`  - ${p.ts.slice(0, 16).replace('T', ' ')} [${label(p)}] ${p.reason}`);
+  const at = (e) => localDateTime(Date.parse(e.ts));
+  for (const p of pauses) lines.push(`  - ${at(p)} [${label(p)}] ${p.reason}`);
+  const persist = events.filter((e) => e.type === 'persist_write');
+  if (persist.length) {
+    lines.push(`- files with lasting instructions for Claude written during pauses: ${persist.length}`);
+    for (const p of persist) lines.push(`  - ${at(p)} [${label(p)}] ${p.tool} ${p.file}`);
+  }
   if (done.length) lines.push('- closed tasks:');
   for (const d of done) {
-    lines.push(`  - ${d.ts.slice(0, 10)} [${label(d)}] "${d.title}" · hint ${d.hint}/${MAX_HINT} · ${d.minutes} min` +
+    lines.push(`  - ${at(d).slice(0, 10)} [${label(d)}] "${d.title}" · hint ${d.hint}/${MAX_HINT} · ${d.minutes} min` +
       (d.learned ? ` · user's note: ${d.learned}` : ''));
   }
   return lines.join('\n');
@@ -653,7 +820,7 @@ function dueRepeats(now = Date.now()) {
   } catch {
     return 0;
   }
-  const today = new Date(now).toISOString().slice(0, 10);
+  const today = localDate(now);
   let n = 0;
   for (const line of text.split('\n')) {
     if (!/^\s*- (\[ \] )?repeat:/.test(line)) continue;
@@ -701,8 +868,8 @@ function blockPrompt(message) {
 module.exports = {
   DATA_DIR, EVENTS_FILE, LEARNING_FILE, MARKER, EMPTY_TREE, MAX_HINT, IDLE_MS, LEVELS, LEVEL_SCOPE, DEFAULT_GATE,
   PAUSES_BEFORE_LONG_REASON, LONG_REASON,
-  config, gate, asksForCode, isQuestion, t, levelName, readInput, project, loadState, saveState, logEvent, logError,
-  pruneEvents, isEnabled, isPaused, isActive, expirePause, touchTask, fmtTime, headCommit, snapshot, compact,
-  changedLines, attemptLines, reviewDiff, sessionBaseline, statusLine, readEvents, pausesToday, stats, dueRepeats,
-  appendLearning, respond, blockPrompt,
+  config, gate, asksForCode, isQuestion, stripPasted, t, levelName, readInput, git, gitTry, project, loadState, saveState,
+  lockState, logEvent, logError, pruneEvents, isEnabled, isPaused, isActive, expirePause, touchTask, fmtTime, localDate,
+  headCommit, snapshot, compact, isCurrent, changedLines, attemptLines, effectiveBase, reviewDiff, hasSessionBaseline,
+  sessionBaseline, statusLine, readEvents, pausesToday, stats, dueRepeats, appendLearning, respond, blockPrompt,
 };

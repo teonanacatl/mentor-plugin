@@ -27,5 +27,5 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
-      - run: npm install -g @anthropic-ai/claude-code
+      - run: npm install -g @anthropic-ai/claude-code@2.1.288  # pinned: bump on purpose, not by surprise
       - run: npm run validate

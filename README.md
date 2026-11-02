@@ -12,14 +12,14 @@ itself, so the rules hold without anyone's good will.
 | Layer | What it does | Enforced by |
 | --- | --- | --- |
 | Mentor output style | Claude asks, points to files, explains concepts, reviews your code. Applied automatically while the plugin is enabled (`force-for-plugin`). | instruction |
-| Edit block | `Edit`, `Write`, `NotebookEdit` and file-writing MCP tools are denied in the project. Only Claude's plans, todos, memory and the learning journal stay writable. | `PreToolUse` hook |
-| Self-protection | Claude cannot change mentor's state, Claude Code's settings files or installed plugins, by any tool, not even during a pause. | `PreToolUse` hook |
-| Shell guard | Shell commands that look like they write files (`>`, `sed -i`, `Set-Content`, `git checkout`, `ng g`, `--fix`…) trigger a permission prompt, or are denied. Best effort. | `PreToolUse` hook |
+| Edit block | `Edit`, `Write`, `NotebookEdit` and file-writing MCP tools are denied in the project. Only Claude's plans and memory (as `.md`), todos (as `.json`) and the learning journal stay writable. | `PreToolUse` hook |
+| Self-protection | Claude cannot change mentor's state, Claude Code's settings files or installed plugins, nor run anything stored under `~/.claude`, by any tool, not even during a pause. A shell command that touches those places passes only as a plain read (`cat`, `ls`, `grep`, `jq`…). | `PreToolUse` hook |
+| Shell guard | Commands that look like they write files (`>`, `sed -i`, `Set-Content`, `git checkout`, `git pull`, formatters such as `prettier -w` or `cargo fmt`, `ng g`, `--fix`…), in the shell or through an MCP tool that runs commands, trigger a permission prompt, or are denied. Best effort. | `PreToolUse` hook |
 | Try-first gate | A prompt asking for ready-made code ("napisz…", "dokończ…", "write the code…", "fix it") does not reach Claude until you have changed some lines of code yourself. | `UserPromptSubmit` hook |
 | Hint ladder | `/mentor:hint` climbs direction → concept → API → sketch, one level per call. The level lives in a state file and goes into context with every prompt. | hook + state file |
 | Exit with a cost | `/mentor:off <reason>` lifts the blocks in this project for 30 min. No reason, no pause; from the third pause of a day the reason has to be longer. Every pause is logged. | hook |
 | Review with your diff | `/mentor:done` hands Claude the files you changed during the task, new files with their content, so the senior-style review comes in the first answer. | hook |
-| Code in chat | A large code block in Claude's answer while mentor mode is on is logged (a hook cannot take back text already shown). | `Stop` hook |
+| Code in chat | A large block of new code in Claude's answer while mentor mode is on is logged (a hook cannot take back text already shown). Diffs, logs, terminal blocks and lines already in the repo do not count. | `Stop` hook |
 | Weekly review | `/mentor:review-week` sums up the log: tasks done alone, work time, hint levels, gate stops, pauses and escapes, then quizzes you on topics that are due (Leitner boxes in the journal). | events log + journal |
 | What's new | `/mentor:whats-new` compares the versions in your manifests with the latest releases and turns the changes into exercises on your own code. | skill |
 
@@ -73,19 +73,28 @@ and the self-protection keeps it from editing the state file or the settings ins
 
 **Which prompts.** Imperatives and requests in Polish and English: "napisz", "dokończ",
 "stwórz", "rozwiąż", "czy możesz napisać…", "write the function", "add the missing method",
-"refactor this", "can you code this up?". Information questions pass: "how do I fix this?",
-"czy powinienem dopisać test?", "popraw mnie, jeśli się mylę". The pattern knows Polish word
-boundaries, so the first person ("napiszę", "poprawię") passes. Only real slash commands
-(`/review …`) skip the gate; `/ napisz to` does not.
+"refactor this", "give me a function that…", "make it work", "zmień to na async", "can you code
+this up?". Information questions pass: "how do I fix this?", "czy powinienem dopisać test?",
+"popraw mnie, jeśli się mylę". So do your own plans ("I want to build a parser", "let me write it
+myself", "I need to implement the cache"): a verb after "I", "we" or "let me" is yours. Pasted
+material is not read as a request: fenced and indented code, `> quotes`, comment lines and
+`inline code` are removed first. The pattern knows Polish word boundaries, so the first person
+("napiszę", "poprawię") passes. Only real slash commands (`/review …`) skip the gate; `/ napisz to`
+does not.
 
 **What counts as your attempt.** At least `attempt_min_lines` (default 3) changed lines of code
 since the task started, or, without a task, since the session started:
 
-- tracked changes, untracked files and new commits all count, so committing work in progress
-  still counts;
-- lock files, build output and generated files do not (`dist/`, `build/`, `coverage/`,
-  `node_modules/`, `*.log`, `package-lock.json`… plus your own `attempt_ignore`), so a test run
-  that writes `coverage.json` does not open the gate;
+- tracked changes, untracked files and your own new commits all count, so committing work in
+  progress still counts;
+- blank lines and whitespace do not (the count ignores both), so reformatting is not an attempt;
+- commits that are not yours do not count either: after a merge, a commit by another author
+  (`git pull` during the task) or a commit older than the task (switching to an existing branch),
+  only changes after it count, and the review in `/mentor:done` says where it started;
+- lock files, build output and generated files do not count (`/dist/`, `/build/`, `/out/`,
+  `/coverage/`, `/target/` at the repo root, `node_modules/` and caches anywhere, `*.log`,
+  `package-lock.json`… plus your own `attempt_ignore`, gitignore-style), so a test run that writes
+  `coverage.json` does not open the gate, while `scripts/build/release.js` still counts;
 - changes made before the task or the session do not count: a repo that is always a bit dirty
   is not a permanent pass. If that earlier work is your attempt, say so with `/mentor:try`;
 - a task opened implicitly by `/mentor:hint` or `/mentor:try` keeps the session's starting point,
@@ -134,10 +143,12 @@ Asked when you enable the plugin, editable in `/config`:
 Everything stays on your machine, in `~/.claude/plugins/data/mentor-…/`:
 
 - `state/<project id>.json`: pause, open task, session starting points; one file per repository,
-  so parallel sessions in different repos never overwrite each other
+  so parallel sessions in different repos never overwrite each other, and a short lock file
+  serialises sessions in the same repo
 - `events.jsonl`: the log (task start/end with work time, hints, `/mentor:try` texts, gate stops
   with the first 120 characters of the prompt, blocked edits and tampering, code in chat, pauses
-  with reasons, what's-new checks). Each event carries the repo's folder name and a short id, so
+  with reasons, files with lasting instructions for Claude (`CLAUDE.md`, agents, skills, commands,
+  output styles) written during a pause, what's-new checks). Each event carries the repo's folder name and a short id, so
   two repos called `app` stay apart. Events older than `keep_days` are removed once a day.
 - `LEARNING.md`: the learning journal written by `/mentor:done`, the quiz and `whats-new`. Never pruned.
 
@@ -162,9 +173,16 @@ from the conversation and goes one level up, or takes the level you give (`/ment
 - **There is no unbreakable lock, by design.** You can always disable the plugin. The goal is
   friction and visibility of escapes, not a prison. A lock that is too hard gets removed at the
   first deadline.
-- **The gate is a regex.** Rephrasing gets around it. That still takes a conscious decision,
-  which is the point. A model-based classifier (a `prompt` hook) would be harder to fool, but it
-  adds a model call to every prompt and cannot see the attempt state; it is not there yet.
+- **The gate is a regex.** Rephrasing gets around it, and the list of phrasings will never be
+  complete. That still takes a conscious decision, which is the point. A model-based classifier
+  (a `prompt` hook) would be harder to fool, but a plugin's hooks cannot be switched by a
+  `userConfig` option, so it would add a model call to every prompt of every user, and it cannot
+  see whether the attempt was already made; it is not there yet.
+- **Protected places are recognised by name.** A command that builds the path at run time
+  (`HOME + '/.cl' + 'aude'`) is not recognised. A git commit message that mentions `.claude` is
+  refused as if it touched it.
+- **Timeouts fail open.** When a hook errors, file changes are denied and everything else passes;
+  when it runs out of time, Claude Code lets the tool call through.
 - **The shell guard is a heuristic.** It will miss creative commands. With `bash_guard_deny`
   it denies instead of asking.
 - **Code in chat is only logged.** The output style asks Claude not to hand over solutions; a
@@ -176,7 +194,7 @@ from the conversation and goes one level up, or takes the level you give (`/ment
 ## Development
 
 CI runs the hook tests on Linux, macOS and Windows with Node 20 and 22, and
-`claude plugin validate --strict` on both manifests.
+`claude plugin validate --strict` on both manifests with a pinned Claude Code version.
 
 ```
 npm test

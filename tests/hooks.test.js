@@ -28,6 +28,8 @@ function setup({ git = true, root: shared } = {}) {
   fs.mkdirSync(config, { recursive: true });
   if (git) {
     execFileSync('git', ['init', '-q'], { cwd: repo });
+    execFileSync('git', ['config', 'user.email', 't@t'], { cwd: repo }); // the user, for the own-commit filter
+    execFileSync('git', ['config', 'core.autocrlf', 'false'], { cwd: repo });
     fs.writeFileSync(path.join(repo, 'app.js'), 'console.log(1);\n');
     commit(repo, 'init');
   }
@@ -573,16 +575,16 @@ test('Stop hook logs large code blocks in answers while mentor mode is active', 
   const transcript = path.join(s.root, 'transcript.jsonl');
   fs.writeFileSync(transcript, [
     { type: 'user', message: { content: 'napisz to' } },
-    { type: 'assistant', message: { content: [{ type: 'text', text: '```ts\n' + lines(9) }] } },
+    { type: 'assistant', message: { content: [{ type: 'text', text: '```ts\n' + lines(9, 'first') }] } },
     { type: 'user', message: { content: [{ type: 'tool_result', content: 'ok' }] } },
-    { type: 'assistant', message: { content: [{ type: 'text', text: lines(9) + '```' }] } },
+    { type: 'assistant', message: { content: [{ type: 'text', text: lines(9, 'second') + '```' }] } },
   ].map((e) => JSON.stringify(e)).join('\n') + '\n');
   s.stop({ transcript_path: transcript });
 
   const logged = s.events().filter((e) => e.type === 'code_in_chat');
   assert.deepStrictEqual(logged.map((e) => e.lines), [20, 18]);
   assert.strictEqual(logged[0].task, 'kod w czacie');
-  assert.match(ctx(s.prompt('/mentor:review-week')), /large code block while mentor mode was active: 2 \(20 lines at hint 0\/4/);
+  assert.match(ctx(s.prompt('/mentor:review-week')), /large block of new code while mentor mode was active: 2 \(20 lines at hint 0\/4/);
 
   s.prompt('/mentor:off normalny tryb na chwilę');
   s.stop({ last_assistant_message: big });
@@ -630,4 +632,180 @@ test('events carry a project id; same folder names are told apart; old events ar
   fs.appendFileSync(path.join(a.data, 'events.jsonl'), old + '\n');
   a.start();
   assert.ok(!a.events().some((e) => e.reason === 'stare'), 'events older than keep_days are removed');
+});
+
+// --- 0.4.0 ---
+
+test('allowed places take only Markdown or JSON, and nothing there can be run', () => {
+  const s = setup();
+  for (const f of [path.join(s.config, 'plans', 'x.js'), path.join(s.config, 'todos', 'x.md'),
+    path.join(s.config, 'projects', 'p', 'memory', 'x.py')]) {
+    assert.strictEqual(s.decision('Write', { file_path: f, content: "require('fs').writeFileSync('a.js','x')" }), 'deny', `should deny: ${f}`);
+  }
+  const plan = path.join(s.config, 'plans', 'x.md');
+  assert.strictEqual(s.tool('Write', { file_path: plan, content: '# plan' }).stdout, '');
+  for (const cmd of [`node ${plan}`, `node ${path.join(s.data, 'LEARNING.md')}`, `python3 ${plan}`, 'node ~/.claude/plans/x.md',
+    `cd ${path.join(s.config, 'plans')} && node x.md`, 'bash ~/.claude/todos/run.json']) {
+    assert.strictEqual(s.decision('Bash', { command: cmd }), 'deny', `should deny: ${cmd}`);
+  }
+});
+
+test('commands touching protected places pass only as plain reads', () => {
+  const s = setup();
+  for (const cmd of [
+    `python3 -c "import pathlib; pathlib.Path.home().joinpath('.claude/settings.json').write_text('{}')"`,
+    `node -e "require('fs').rmSync(process.env.HOME+'/.claude/plugins',{recursive:true})"`,
+    "jq '.enabledPlugins={}' ~/.claude/settings.json | sponge ~/.claude/settings.json",
+    'git -C ~/.claude commit -am x',
+    `find ${s.data} -delete`,
+  ]) {
+    assert.strictEqual(s.decision('Bash', { command: cmd }), 'deny', `should deny: ${cmd}`);
+  }
+  for (const cmd of [`cat ${path.join(s.config, 'settings.json')}`, 'ls ~/.claude/plans', "jq '.enabledPlugins' ~/.claude/settings.json",
+    `grep -rn TODO ${s.data} | head -5`, 'cd ~/.claude && git log --oneline -3']) {
+    assert.strictEqual(s.tool('Bash', { command: cmd }).stdout, '', `should pass: ${cmd}`);
+  }
+});
+
+test('MCP: camelCase and apply verbs are writes; commands run through MCP are guarded', () => {
+  const s = setup();
+  assert.strictEqual(s.decision('mcp__fs__apply_diff', { path: 'app.js', diff: '-a\n+b' }), 'deny');
+  assert.strictEqual(s.decision('mcp__x__fileWrite', { filePath: 'app.js', content: 'x' }), 'deny');
+  assert.strictEqual(s.decision('mcp__dc__start_process', { command: "sed -i 's/a/b/' app.js" }), 'ask');
+  assert.strictEqual(s.decision('mcp__x__executeCode', { code: "require('fs').writeFileSync('app.js', 'x')" }), 'ask');
+  assert.strictEqual(s.decision('mcp__ide__run_terminal_cmd', { cmd: 'claude plugin disable mentor' }), 'deny');
+  assert.strictEqual(s.tool('mcp__dc__start_process', { command: 'npm test' }).stdout, '');
+  assert.strictEqual(s.tool('mcp__dc__read_process_output', { pid: 12 }).stdout, '');
+});
+
+test("someone else's commits and a branch switch are not the user's attempt", () => {
+  const s = setup();
+  s.prompt('/mentor:task po pullu');
+  s.append('colleague.js', lines(10, 'colleague'));
+  execFileSync('git', ['add', '-A'], { cwd: s.repo });
+  execFileSync('git', ['-c', 'user.name=k', '-c', 'user.email=kolega@firma', 'commit', '-qm', 'their work'], { cwd: s.repo });
+  assert.strictEqual(s.prompt('napisz to').code, 2, 'a commit by another author does not count');
+  const review = ctx(s.prompt('/mentor:done'));
+  assert.doesNotMatch(review, /colleague 0/);
+  assert.match(review, /moved: a commit by kolega@firma came in/);
+
+  const b = setup();
+  execFileSync('git', ['checkout', '-qb', 'feature'], { cwd: b.repo });
+  b.append('feature.js', lines(10, 'old branch work'));
+  commit(b.repo, 'feature from last week');
+  execFileSync('git', ['checkout', '-q', '-'], { cwd: b.repo });
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2500); // the task starts seconds after the branch's commit
+  b.prompt('/mentor:task na mainie');
+  execFileSync('git', ['checkout', '-q', 'feature'], { cwd: b.repo });
+  assert.strictEqual(b.prompt('napisz to').code, 2, 'switching to a branch with older commits is not an attempt');
+  b.append('app.js', lines(3, 'my change'));
+  assert.strictEqual(b.prompt('napisz to').code, 0);
+
+  for (const cmd of ['git pull', 'git merge origin/main', 'git rebase main', 'git cherry-pick abc123']) {
+    assert.strictEqual(s.decision('Bash', { command: cmd }), 'ask', `should ask: ${cmd}`);
+  }
+});
+
+test('blank lines, whitespace and formatters are not an attempt', () => {
+  const s = setup();
+  s.append('app.js', 'function a() {\nreturn 1;\n}\n');
+  commit(s.repo, 'code');
+  s.prompt('/mentor:task białe znaki');
+  s.append('app.js', '\n\n\n\n\n');
+  assert.strictEqual(s.prompt('napisz to').code, 2, 'blank lines');
+  fs.writeFileSync(path.join(s.repo, 'app.js'), 'console.log(1);\nfunction a() {\n    return 1;\n}\n');
+  assert.strictEqual(s.prompt('napisz to').code, 2, 'reindenting');
+  fs.writeFileSync(path.join(s.repo, 'empty.js'), '\n\n\n\n');
+  assert.strictEqual(s.prompt('napisz to').code, 2, 'a new file with blank lines');
+
+  for (const cmd of ['npx prettier -w .', 'npm run format', 'pnpm lint:fix', 'yarn fix', 'gofmt -w .', 'cargo fmt', 'black .',
+    'ruff format src', 'dotnet format', 'npx prisma generate', 'go fmt ./...']) {
+    assert.ok(looksLikeWrite(cmd), `should flag: ${cmd}`);
+  }
+  for (const cmd of ['black --check .', 'npm run format:check', 'ruff format --check', 'npx prettier --check .']) {
+    assert.ok(!looksLikeWrite(cmd), `should pass: ${cmd}`);
+  }
+});
+
+test("the gate leaves the user's own plans and pasted code alone", () => {
+  const s = setup();
+  for (const p of ['I want to build a parser. Where do I start?', 'Let me write the code myself first.',
+    'I need to implement the cache and I am stuck on eviction.', "We'll add the missing check later, what should it test?",
+    'Here is the log:\n```\n// TODO: add the missing null check\nTypeError: x is undefined\n```\nWhat does it mean?',
+    '> write the function\nThat is what the ticket says. What does "idempotent" mean here?',
+    'The comment says `fix it later`. Is that a smell?']) {
+    assert.strictEqual(s.prompt(p).code, 0, `should pass: ${p}`);
+  }
+  for (const p of ['give me a function that parses IPs', 'rewrite this module', 'zmień to na async', 'make it work',
+    'please do it for me', 'do the rest', 'potrzebuję gotowego kodu', 'I tried. Now write the rest of it.']) {
+    assert.strictEqual(s.prompt(p).code, 2, `should block: ${p}`);
+  }
+});
+
+test('lasting instructions written during a pause are logged for the review', () => {
+  const s = setup();
+  s.prompt('/mentor:off refaktor konfiguracji z zespołem');
+  assert.strictEqual(s.tool('Write', { file_path: path.join(s.config, 'CLAUDE.md'), content: 'x' }).stdout, '');
+  assert.strictEqual(s.tool('Write', { file_path: path.join(s.repo, '.claude', 'agents', 'coder.md'), content: 'x' }).stdout, '');
+  assert.strictEqual(s.tool('Write', { file_path: path.join(s.repo, 'app.js'), content: 'x' }).stdout, '');
+  assert.strictEqual(s.events().filter((e) => e.type === 'persist_write').length, 2);
+  assert.match(ctx(s.prompt('/mentor:review-week')), /lasting instructions for Claude written during pauses: 2/);
+});
+
+test('code in chat: diffs, logs and quotes of the repo do not count', () => {
+  const s = setup();
+  const own = lines(20, 'already in the repo');
+  s.append('app.js', own);
+  commit(s.repo, 'own code');
+  s.prompt('/mentor:task cytaty');
+  s.stop({ last_assistant_message: '```diff\n' + lines(30, 'diff line') + '```' });
+  s.stop({ last_assistant_message: '```text\n' + lines(30, 'log line') + '```' });
+  s.stop({ last_assistant_message: 'Look at your code:\n```js\n' + own + '```' });
+  assert.ok(!s.events().some((e) => e.type === 'code_in_chat'));
+  s.stop({ last_assistant_message: '```js\n' + own + lines(16, 'brand new') + '```' });
+  assert.strictEqual(s.events().filter((e) => e.type === 'code_in_chat')[0].lines, 16);
+});
+
+test('dates are local everywhere', () => {
+  const s = setup();
+  const d = new Date();
+  const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  assert.match(ctx(s.prompt('/mentor:review-week')), new RegExp(`Today is ${today}`));
+  fs.mkdirSync(s.data, { recursive: true });
+  fs.writeFileSync(path.join(s.data, 'LEARNING.md'), `- [ ] repeat: a (box 1, due ${today})\n`);
+  assert.match(ctx(s.prompt('/mentor:review-week')), /due today or earlier: 1/);
+});
+
+test('build/ and out/ are skipped only at the repo root', () => {
+  const s = setup();
+  s.prompt('/mentor:task skrypty');
+  fs.mkdirSync(path.join(s.repo, 'build'));
+  fs.writeFileSync(path.join(s.repo, 'build', 'bundle.js'), lines(10));
+  assert.strictEqual(s.prompt('napisz to').code, 2);
+  fs.mkdirSync(path.join(s.repo, 'scripts', 'build'), { recursive: true });
+  fs.writeFileSync(path.join(s.repo, 'scripts', 'build', 'release.js'), lines(3, 'real code'));
+  assert.strictEqual(s.prompt('napisz to').code, 0);
+});
+
+test('a broken edit hook fails closed, reads still pass', () => {
+  const s = setup();
+  const notADir = path.join(s.root, 'not-a-dir');
+  fs.writeFileSync(notADir, 'x');
+  s.env.CLAUDE_PLUGIN_DATA = notADir;
+  const r = s.tool('Edit', { file_path: path.join(s.repo, 'app.js') });
+  assert.strictEqual(r.json.hookSpecificOutput.permissionDecision, 'deny');
+  assert.match(r.json.hookSpecificOutput.permissionDecisionReason, /hook failed/);
+  assert.strictEqual(s.tool('Bash', { command: 'ls' }).stdout, '');
+  assert.strictEqual(s.prompt('jak to działa?').code, 0, 'prompts still fail open');
+});
+
+test('a stale state lock does not block a prompt', () => {
+  const s = setup();
+  s.prompt('/mentor:task lock');
+  const lock = s.stateFile() + '.lock';
+  fs.writeFileSync(lock, '99999');
+  const old = new Date(Date.now() - 60000);
+  fs.utimesSync(lock, old, old);
+  assert.match(ctx(s.prompt('co dalej?')), /task: "lock"/);
+  assert.ok(!fs.existsSync(lock), 'the lock is released after the prompt');
 });

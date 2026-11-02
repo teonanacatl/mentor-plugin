@@ -87,7 +87,7 @@ function handleCommand(ctx, name, args) {
       const changed = review ? review.stat !== '' : null;
       lib.logEvent(proj, 'task_done', { title: task.title, hint: task.hint, minutes, wallMinutes, changed, learned: args || '' });
       lib.appendLearning(
-        `## ${new Date(now).toISOString().slice(0, 10)} — ${task.title}\n` +
+        `## ${lib.localDate(now)} — ${task.title}\n` +
         `- hints: ${task.hint}/${lib.MAX_HINT} (${lib.LEVELS.en[task.hint]}) · ${minutes} min of work\n` +
         (args ? `- in my words: ${args}\n` : ''));
       state.task = null;
@@ -98,12 +98,12 @@ function handleCommand(ctx, name, args) {
         `(${lib.LEVELS.en[task.hint]}). Work time: ${minutes} min (open for ${wallMinutes} min). ` +
         `Repo changed since the task started: ${changedText}. ` +
         `User's own summary: ${args ? `"${args}"` : 'none given'}. An entry was appended to the learning journal ${lib.LEARNING_FILE}. ` +
-        `Today is ${new Date(now).toISOString().slice(0, 10)}.`;
+        `Today is ${lib.localDate(now)}.`;
       if (review) {
         const base = review.base === lib.EMPTY_TREE
           ? 'the empty tree (no commits yet)'
-          : `commit ${review.base.slice(0, 7)} (where the task started)`;
-        text += `\n[mentor] Files changed during the task (against ${base}, commits during the task included, ` +
+          : `commit ${review.base.slice(0, 7)} (${review.note ? 'moved: ' + review.note : 'where the task started'})`;
+        text += `\n[mentor] Files changed during the task (against ${base}, the user's own commits during the task included, ` +
           `new untracked files with their content; lock files and build output left out):\n${review.stat || '(none)'}\n` +
           `[mentor] git status --short:\n${review.status || '(clean)'}\n` +
           `[mentor] Diff of the files changed during the task:\n${review.diff || '(no diff)'}`;
@@ -154,7 +154,7 @@ function handleCommand(ctx, name, args) {
       const days = Math.max(1, parseInt(args, 10) || 7);
       return context(
         `${lib.stats(days)}\nLearning journal: ${lib.LEARNING_FILE}\n` +
-        `Today is ${new Date(now).toISOString().slice(0, 10)}. Repetition items due today or earlier: ${lib.dueRepeats(now)}.\n` +
+        `Today is ${lib.localDate(now)}. Repetition items due today or earlier: ${lib.dueRepeats(now)}.\n` +
         `Focus topics set by the user: ${cfg.focusTopics || 'none'}\n${lib.statusLine(cfg, proj, state)}`);
     }
 
@@ -163,7 +163,7 @@ function handleCommand(ctx, name, args) {
       lib.logEvent(proj, 'whats_new', { arg: args.slice(0, 120) });
       const exists = fs.existsSync(lib.LEARNING_FILE);
       return context(
-        `[mentor] What's-new check requested${args ? ` for: ${args}` : ''}. Today is ${new Date(now).toISOString().slice(0, 10)}. ` +
+        `[mentor] What's-new check requested${args ? ` for: ${args}` : ''}. Today is ${lib.localDate(now)}. ` +
         `Learning journal: ${lib.LEARNING_FILE} (${exists ? 'exists' : 'not created yet; append creates it'}). ` +
         `Focus topics set by the user: ${cfg.focusTopics || 'none'}.\n${lib.statusLine(cfg, proj, state)}`);
     }
@@ -194,6 +194,7 @@ function main() {
   const prompt = String(input.prompt || '').trim();
   const cfg = lib.config();
   const proj = lib.project(input);
+  lib.lockState(proj);
   const state = lib.loadState(proj);
   const now = Date.now();
   const ctx = { cfg, proj, state, input, now };
@@ -211,10 +212,10 @@ function main() {
   const task = state.task;
   if (task) {
     lib.touchTask(task, paused, now);
-    if (!task.baseline) task.baseline = lib.compact(lib.snapshot(proj, cfg)); // task from 0.2
+    if (!lib.isCurrent(task.baseline)) task.baseline = lib.compact(lib.snapshot(proj, cfg)); // task from an older version
     changed = true;
   }
-  if (proj.git && !state.sessions[input.session_id || 'default']) {
+  if (proj.git && !lib.hasSessionBaseline(state, input.session_id)) {
     lib.sessionBaseline(proj, cfg, state, input.session_id, now);
     changed = true;
   }
