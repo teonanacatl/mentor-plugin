@@ -27,10 +27,13 @@ files with their content; lock files and build output are left out.
    hardest part, or what they would do differently next time. Then ask the transfer question:
    how would they recognise the same problem elsewhere in this codebase, and which test would
    guard against it coming back. In debug mode ask about the method (how the cause was found),
-   in read mode ask them to explain the traced flow in two sentences.
+   in read mode ask them to explain the traced flow in two sentences. In explain mode skip the
+   review of "their" code: ask two questions that check they understand the code you wrote.
 4. **Transfer exercise.** Propose one small analogous problem the user can solve alone in a few
    days: another place in this repo with the same pattern, or a minimal kata on the same concept.
-   Describe the goal only, never the solution.
+   Describe the goal only, never the solution. Give the command that measures it as a real task:
+   `/mentor:task <exercise> #transfer #<topic>` (the hint level it needs is then logged, so the
+   result is measured, not declared).
 5. **Journal.** Append two to five bullets under the newest entry in
    `${CLAUDE_PLUGIN_DATA}/LEARNING.md`: `- review: …` for the main remarks,
    `- [ ] repeat: <topic> (box 1, due YYYY-MM-DD)` for each concept worth quizzing later, due

@@ -1,28 +1,40 @@
 # mentor — a Claude Code plugin that teaches instead of doing
 
 Using an AI assistant can make you faster and, at the same time, worse at programming. In
-Anthropic's study on [how AI assistance affects coding skills](https://www.anthropic.com/research/AI-assistance-coding-skills),
-the developers who kept learning were the ones who used AI to build understanding: asking
-follow-up questions and concepts instead of taking ready-made code.
+Anthropic's study on [how AI assistance affects coding skills](https://www.anthropic.com/research/AI-assistance-coding-skills)
+(52 developers learning an unfamiliar Python library), the AI group scored 17% lower on a quiz
+afterwards, most of all on debugging. What decided it was *how* AI was used. Low scores came from
+delegating all the code, sliding into it after a few questions, and debugging through the AI.
+High scores came from asking only conceptual questions, from asking for code together with its
+explanation, and from generating code and then asking how it works. The groups were small (2 to
+7 people per pattern), but the direction is clear: **the goal is understanding, not "no code"**.
+
+So the plugin does two things. Where you want to learn, you write the code and Claude guides,
+hints and reviews. Where you do not (configuration, wiring, boilerplate), or when you choose to,
+Claude writes the code and checks that you understand it. And it measures whether you need less
+help over time, not only what the tool did.
 
 An output style can ask Claude to work like that, but nothing enforces it, and at 17:45 before a
-deadline neither Claude nor you will want to. This plugin adds **hooks**, which Claude Code runs
-itself, so the rules hold without anyone's good will.
+deadline neither Claude nor you will want to. **Hooks**, which Claude Code runs itself, keep the
+part you chose to write yours.
 
 | Layer | What it does | Enforced by |
 | --- | --- | --- |
-| Mentor output style | Claude asks, points to files, explains concepts, reviews your code. Applied automatically while the plugin is enabled (`force-for-plugin`). | instruction |
-| Edit block | `Edit`, `Write`, `NotebookEdit` and file-writing MCP tools are denied in the project. Only Claude's plans and memory (as `.md`), todos (as `.json`) and the learning journal stay writable. | `PreToolUse` hook |
+| Mentor output style | Claude asks, points to files, explains concepts, reviews your code; where it writes code, it explains it and asks a question that checks your understanding. Applied automatically while the plugin is enabled (`force-for-plugin`). | instruction |
+| Learning scope | `/mentor:task <title> --mine src/parser/**`: the part you write yourself. Claude may write everything outside it (and is asked to check your understanding of it); inside it, edits are blocked. Most of a real task is routine, so this removes most reasons to pause. | `PreToolUse` hook |
+| Edit block | Without a scope: `Edit`, `Write`, `NotebookEdit` and file-writing MCP tools are denied in the project. Only Claude's plans and memory (as `.md`), todos (as `.json`) and the learning journal stay writable. | `PreToolUse` hook |
 | Self-protection | Claude cannot change mentor's state, Claude Code's settings files or installed plugins, nor run anything stored under `~/.claude`, by any tool, not even during a pause. A shell command that touches those places passes only as a plain read (`cat`, `ls`, `grep`, `jq`…). | `PreToolUse` hook |
 | Shell guard | Commands that look like they write files (`>`, `sed -i`, `Set-Content`, `git checkout`, `git pull`, formatters such as `prettier -w` or `cargo fmt`, `ng g`, `--fix`…), in the shell or through an MCP tool that runs commands, trigger a permission prompt, or are denied. Best effort. | `PreToolUse` hook |
 | Try-first gate | A prompt asking for ready-made code ("napisz…", "dokończ…", "write the code…", "fix it") does not reach Claude until you have changed some lines of code yourself. | `UserPromptSubmit` hook |
-| Kinds of work | `/mentor:mode practice` (you solve it), `guided` (Claude leads in small steps), `debug` (hypothesis → experiment → analysis; the gate opens with a hypothesis), `read` (understanding existing code, no gate), `normal <reason>` (mentor off until you switch back, logged like a pause). | hook + style |
+| Kinds of work | `practice` (you solve it), `guided` (Claude leads in small steps), `debug` (hypothesis → experiment → analysis; the gate opens with a hypothesis), `read` (understanding existing code, no gate), `explain` (Claude writes the code with its explanation and a check question after each piece: the study's generation-then-comprehension pattern), `normal <reason>` (mentor off until you switch back, logged like a pause). Read from the task title (a bug → debug, "how does … work" → read) unless you set it with `--mode` or `/mentor:mode`. | hook + style |
 | Hint ladder | `/mentor:hint` climbs direction → concept → API → sketch, one level per call; `/mentor:hint 3` sets a level, `/mentor:hint reset` starts over. Levels are cumulative. The level lives in a state file and goes into context with every prompt. | hook + state file |
 | Exit with a cost | `/mentor:off <reason>` lifts the blocks in this project for 30 min. No reason, no pause; from the third pause of a day the reason has to be longer. Every pause is logged. | hook |
 | Review with your diff | `/mentor:done` hands Claude the files you changed during the task, new files with their content, so the senior-style review comes in the first answer. | hook |
 | Code in chat | A large block of new code in Claude's answer while mentor mode is on is logged (a hook cannot take back text already shown). Diffs, logs, terminal blocks and lines already in the repo do not count. | `Stop` hook |
-| Weekly review | `/mentor:review-week` sums up the log and, apart from activity, outcome measures: false blocks, stops followed by a pause, delayed recall from earlier quizzes, transfer exercises solved alone. Then it quizzes you on topics that are due (Leitner boxes) and follows up the transfer exercises. | events log + journal |
-| Transfer | `/mentor:done` ends with a transfer question and one small analogous exercise to solve alone in a few days; the weekly review asks how it went. | skill + journal |
+| Skill trend | Tag tasks with `#topic` (or a focus topic in the title). The weekly review shows, per topic, the help each task needed over time, for example `rxjs: 3 → 2 → 1`. Nobody grades this: it is the hint level you asked for. | events log |
+| Checkpoint | `/mentor:checkpoint <topic>`: three short exercises solved without AI, timed; repeat in a few weeks at the same difficulty and compare. | hook + skill |
+| Weekly review | `/mentor:review-week` starts with those skill measures, then the tool's: false blocks, stops followed by a pause, delayed recall from earlier quizzes. Then it quizzes you on topics that are due (Leitner boxes) and follows up the transfer exercises. | events log + journal |
+| Transfer | `/mentor:done` ends with a transfer question and one small analogous exercise, to start as `/mentor:task <exercise> #transfer #topic`, so its result is measured (the hint level it needed), not declared. | skill + events log |
 | Topic profile | Session start reads the journal's boxes: topics you know well, topics still weak. Claude takes smaller steps on the weak ones and steps in less on the known ones. You can correct it in the journal. | journal |
 | What's new | `/mentor:whats-new` compares the versions in your manifests with the latest releases and turns the changes into exercises on your own code. | skill |
 
@@ -55,21 +67,29 @@ framework, a domain you want to own); routine work you already know goes in norm
 
 ## Commands
 
+Four are enough for daily work:
+
 | Command | |
 | --- | --- |
-| `/mentor:task <title>` | Start a task: hint level 0, snapshot of the repo state |
+| `/mentor:task <title> [#topic …] [--mine <glob> …] [--mode <kind>]` | Start a task: hint level 0, a snapshot of the repo, the kind of work read from the title, your scope and topics |
 | `/mentor:hint [1-4 \| reset] [where I'm stuck]` | Next hint level, a given level, or back to 0 |
-| `/mentor:mode <practice\|guided\|debug\|read\|normal <reason>>` | The kind of work in this repo (default from `default_mode`) |
-| `/mentor:wrong [why]` | The last gate stop was not a request for code: logged as a false block, your next prompt goes through |
-| `/mentor:forget <all\|days\|text>` | Remove the events log, events older than N days, or only the text in them |
-| `/mentor:try <what I checked / suspect>` | Describe your own attempt or hypothesis; counts as an attempt for the gate without editing files (debugging, reading unfamiliar code, a one-line fix) |
 | `/mentor:done [what I learned]` | Close the task, get a senior-style review, write the journal |
 | `/mentor:off <reason>` | Pause for `off_minutes` (default 30) in this project |
+
+The rest is occasional:
+
+| Command | |
+| --- | --- |
+| `/mentor:try <what I checked / suspect>` | Describe your own attempt or hypothesis; counts as an attempt for the gate without editing files (debugging, reading unfamiliar code, a one-line fix) |
+| `/mentor:mode <practice\|guided\|debug\|read\|explain\|normal <reason>>` | The kind of work in this repo (default from `default_mode`) |
 | `/mentor:on` | End the pause early |
-| `/mentor:enable`, `/mentor:disable` | Turn mentor mode on or off for this repo (with `activation = marker`) |
-| `/mentor:status` | Mode, task, hint level, settings, file locations |
-| `/mentor:review-week [days]` | Review of the log plus a quiz |
+| `/mentor:checkpoint <topic>`, `/mentor:checkpoint done <n>/<m>` | A timed test without AI on one topic |
+| `/mentor:review-week [days]` | The review, a quiz and the transfer follow-up |
+| `/mentor:wrong [why]` | The last gate stop was not a request for code: logged as a false block, your next prompt goes through |
 | `/mentor:whats-new [package]` | New releases of your stack turned into exercises |
+| `/mentor:status` | Mode, task, hint level, settings, file locations |
+| `/mentor:forget <all\|days\|text>` | Remove the events log, events older than N days, or only the text in them |
+| `/mentor:enable`, `/mentor:disable` | Turn mentor mode on or off for this repo (with `activation = marker`) |
 
 The state-changing commands are handled by the `UserPromptSubmit` hook when **you** type them
 (with the `mentor:` prefix). Claude cannot invoke them on its own (`disable-model-invocation`),
@@ -134,17 +154,38 @@ box 1, and a correct answer from box 5 ticks it off. Session start mentions it w
 
 ### What is measured
 
-Fewer hints is not the goal: a well-used hint can teach more than struggling alone. So besides
-activity (tasks, hints, stops, pauses), the weekly review reports outcome measures:
+The question is whether you learn, so the measures that matter are about you, and as far as
+possible not judged by Claude:
 
-| Measure | Source |
+| Skill measure | Source |
+| --- | --- |
+| Help per topic over time | the highest hint level of each `#topic` task, oldest first, from the whole log: `rxjs: 3 → 2 → 1` |
+| Transfer, measured | `#transfer` tasks and the hint level they needed |
+| Checkpoints without AI | `/mentor:checkpoint` scores and times per topic, compared over weeks |
+
+Fewer hints is not the goal in itself: a well-used hint can teach more than struggling alone; what
+counts is needing less help *on the same topic* later. Besides those, the review reports how the
+tool behaves:
+
+| Tool measure | Source |
 | --- | --- |
 | False blocks | `/mentor:wrong` after a gate stop, as a share of all stops |
 | Stops worked around | a gate stop followed by a pause in the same repo within 5 minutes |
 | Work time and hint depth | median work minutes and mean highest hint level of closed tasks (own work only) |
 | Work from pauses | tasks closed with code that appeared during a pause, counted apart |
 | Delayed recall | the `score:` lines of earlier quizzes in the journal |
-| Transfer | transfer exercises solved alone, with hints, not solved, skipped |
+| Transfer, declared | journal transfer items marked solved alone, with hints, not solved, skipped |
+| Edits by Claude | edits outside your scope or in explain mode |
+
+### Your own test
+
+The real evaluation is you. A protocol that takes four weeks:
+
+1. Pick one topic. `/mentor:checkpoint <topic>` and solve the exercises without AI.
+2. Work with the plugin for four weeks, tasks tagged `#topic`, your part marked with `--mine`.
+3. `/mentor:checkpoint <topic>` again: same difficulty, different exercises.
+4. `/mentor:review-week 28`: the help trend for the topic, the checkpoint scores, and how often
+   you paused or hit a false block, at which tasks.
 
 ### Model behaviour (evals)
 
@@ -160,9 +201,32 @@ npm run eval        # all cases, with the no-plugin baseline; needs a logged-in 
 npm run eval:free   # the case that needs no model call (also run in CI)
 ```
 
-Last full run (0.6.1, 2 runs per arm): **7/7 cases, score 1.00 with the plugin, +0.79 over the
-same prompts without it**, about $2. Without the plugin Claude writes the function, edits the
+Last full run (0.7.0, 2 runs per arm): **7/7 cases, score 1.00 with the plugin, +0.71 over the
+same prompts without it** (0.29), about $2. Without the plugin Claude writes the function, edits the
 file, names the APIs at hint 1 and hands over the fixed line; with it, it does none of that.
+
+This shows that the plugin makes Claude follow the rules, which is expected; it says nothing
+about whether anyone learns (that is what the measures above and your own test are for). What
+it can answer is which part of the plugin produces the behaviour. `npm run eval:ablation` runs
+the same cases against two cut-down copies, the output style and skills alone, and the same plus
+only the Edit/Write block, and prints them next to the full plugin (`npm run eval:compare`).
+
+First ablation (0.7.0, Claude Code 2.1.316, 2 runs per case):
+
+| Case | Full plugin | Style + edit block | Style only | No plugin |
+| --- | --- | --- | --- | --- |
+| suite | **1.00** | 0.96 | 0.82 | 0.29 |
+| edits are blocked | 1.00 | 1.00 | 0.00 | |
+| the gate stops an order | 1.00 | 0.75 | 0.75 | |
+| the five teaching cases (no solution, hint 1, hint 4, review, debugging) | 1.00 | 1.00 | 1.00 | |
+
+What it says: the **output style alone produces the teaching behaviour** (all five teaching
+cases at 1.00), but it does not hold the line on files. Asked to "write me the function", Claude
+with the style alone wrote it into the file in one of two runs, and it added the asked-for
+license header every time. The **edit block** keeps the files the user's, though Claude still
+tried an edit once; the **prompt gate** closes that gap, because the request never reaches
+Claude. The shell, MCP and self-protection rules are not what produces the model's behaviour in
+these cases, which is why they are frozen (see Honest limits). Cost: about $1.25 per variant.
 
 On Windows, `bash` on `PATH` is often `C:\Windows\System32\bash.exe`, the WSL launcher, which
 fails when no Linux distribution is installed, and every `fixture.sh` then fails. The npm
@@ -224,6 +288,10 @@ from the conversation and goes one level up, or takes the level you give (`/ment
 
 ## Honest limits
 
+- **Enforcement is frozen.** The opponent is not Claude, which follows the style; it is you at
+  17:45, and you always have `/mentor:off` and `/plugin disable`. So no new heuristics for
+  hypothetical escapes: a new rule only for an escape seen in real use (`events.jsonl`). The
+  effort goes into scope, understanding and measuring progress instead.
 - **There is no unbreakable lock, by design.** You can always disable the plugin. The goal is
   friction and visibility of escapes, not a prison. A lock that is too hard gets removed at the
   first deadline.

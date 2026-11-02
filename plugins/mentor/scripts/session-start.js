@@ -28,10 +28,11 @@ try {
   const lines = [lib.statusLine(cfg, proj, state)];
   if (enabled) {
     lines.push(
-      '[mentor] Commands the user can type: /mentor:task <title>, /mentor:hint [1-4|reset] [where I am stuck], ' +
-        '/mentor:try <my attempt or hypothesis>, /mentor:done [what I learned], /mentor:mode <practice|guided|debug|read|normal>, ' +
-        '/mentor:off <reason>, /mentor:on, /mentor:wrong (a false block), /mentor:status, /mentor:review-week, ' +
-        '/mentor:whats-new, /mentor:forget' + (cfg.activation === 'marker' ? ', /mentor:disable.' : '.'),
+      '[mentor] Core commands: /mentor:task <title> [#topic] [--mine <glob>…] (the user writes the --mine part, you may ' +
+        'write the rest), /mentor:hint [1-4|reset], /mentor:done [what I learned], /mentor:off <reason>. ' +
+        'Occasionally: /mentor:try <hypothesis>, /mentor:mode <practice|guided|debug|read|explain|normal>, /mentor:on, ' +
+        '/mentor:wrong, /mentor:checkpoint <topic>, /mentor:review-week, /mentor:whats-new, /mentor:status, /mentor:forget' +
+        (cfg.activation === 'marker' ? ', /mentor:enable, /mentor:disable.' : '.'),
       `[mentor] Hint ladder: 1 direction, 2 concept, 3 API, 4 sketch. Each /mentor:hint raises the level by one.`);
     if (cfg.focusTopics) lines.push(`[mentor] Focus topics set by the user: ${cfg.focusTopics}.`);
     // The explicit topic profile from the Leitner boxes: smaller steps where the user is weak.

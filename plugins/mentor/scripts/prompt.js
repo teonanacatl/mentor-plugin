@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const lib = require('./lib');
 
-const COMMAND = /^\/mentor:(task|hint|try|done|off|on|status|review-week|whats-new|enable|disable|mode|wrong|forget)\b\s*([\s\S]*)$/i;
+const COMMAND = /^\/mentor:(task|hint|try|done|off|on|status|review-week|whats-new|enable|disable|mode|wrong|forget|checkpoint)\b\s*([\s\S]*)$/i;
 // Only a real slash command skips the gate, not any prompt that happens to start with "/".
 const SLASH_COMMAND = /^\/[\w:.-]+(\s|$)/;
 const MIN_TRY_LENGTH = 20;
@@ -15,7 +15,7 @@ const WRONG_WINDOW_MS = 30 * 60000;
 // Normal mode is a pause without an end; this stands in for "never".
 const NEVER_MS = 10 * 365 * 86400000;
 // Commands that only make sense where mentor mode applies.
-const NEEDS_ENABLED = new Set(['task', 'hint', 'try', 'done', 'off', 'on', 'mode', 'wrong']);
+const NEEDS_ENABLED = new Set(['task', 'hint', 'try', 'done', 'off', 'on', 'mode', 'wrong', 'checkpoint']);
 
 function context(text, systemMessage) {
   const out = { hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: text } };
@@ -26,14 +26,23 @@ function context(text, systemMessage) {
 // An explicit /mentor:task starts from the repo as it is now: earlier changes do not count.
 // An implicit task (opened by /mentor:hint or /mentor:try) keeps the session's baseline, so the
 // work done in this session counts as the attempt.
-function newTask(ctx, title, implicit) {
+// The kind of work: given with --mode, else the repo's (/mentor:mode), else read from the title
+// (a bug → debug, understanding code → read), else the default.
+function newTask(ctx, title, implicit, opts = {}) {
   const { cfg, proj, state, input, now } = ctx;
   const baseline = implicit
     ? lib.sessionBaseline(proj, cfg, state, input.session_id, now)
     : lib.compact(lib.snapshot(proj, cfg));
-  const mode = lib.modeOf(cfg, state);
-  lib.logEvent(proj, 'task_start', { title, mode, ...(implicit ? { implicit: true } : {}) });
-  return { title, mode, startedAt: now, lastActiveAt: now, activeMs: 0, hint: 0, baseline, attempted: false };
+  const inferred = !opts.mode && !state.mode && !implicit ? lib.inferMode(title) : null;
+  const mode = opts.mode || state.mode || inferred || cfg.defaultMode;
+  const extra = {
+    ...(opts.scope && opts.scope.length ? { scope: opts.scope } : {}),
+    ...(opts.topics && opts.topics.length ? { topics: opts.topics } : {}),
+    ...(opts.transfer ? { transfer: true } : {}),
+  };
+  lib.logEvent(proj, 'task_start', { title, mode, ...extra, ...(implicit ? { implicit: true } : {}) });
+  return { title, mode, ...(inferred ? { modeInferred: true } : {}), ...extra,
+    startedAt: now, lastActiveAt: now, activeMs: 0, hint: 0, baseline, attempted: false };
 }
 
 // A task opened by /mentor:hint or /mentor:try takes its title from what the user typed there,
@@ -63,11 +72,22 @@ function handleCommand(ctx, name, args) {
 
   switch (name) {
     case 'task': {
-      if (!args) lib.blockPrompt(lib.t(cfg, 'taskNeedsTitle'));
-      state.task = newTask(ctx, args, false);
+      const opts = lib.parseTaskArgs(cfg, args);
+      if (!opts.title) lib.blockPrompt(lib.t(cfg, 'taskNeedsTitle'));
+      state.task = newTask(ctx, opts.title, false, opts);
       save();
-      return context(`[mentor] New task started: "${args}". Hint level 0/${lib.MAX_HINT}. ` +
-        `Mode: ${lib.modeOf(cfg, state)}.`, lib.t(cfg, 'taskStarted', { task: args }));
+      const t = state.task;
+      const notes = [
+        lib.t(cfg, 'taskStarted', { task: t.title }),
+        lib.t(cfg, t.modeInferred ? 'taskModeInferred' : 'taskMode', { mode: t.mode }),
+        t.scope ? lib.t(cfg, 'taskScope', { scope: t.scope.join(', ') }) : '',
+        t.topics ? lib.t(cfg, 'taskTopics', { topics: t.topics.join(', ') }) : '',
+      ].filter(Boolean);
+      return context(`[mentor] New task started: "${t.title}". Hint level 0/${lib.MAX_HINT}. Mode: ${t.mode}` +
+        (t.modeInferred ? ' (read from the title; the user can change it with /mentor:mode)' : '') + '.' +
+        (t.scope ? ` The user's scope: ${t.scope.join(', ')}.` : '') +
+        (t.topics ? ` Topics: ${t.topics.join(', ')}.` : '') + (t.transfer ? ' This is a transfer exercise.' : '') +
+        `\n${lib.statusLine(cfg, proj, state)}`, notes.join(' · '));
     }
 
     case 'hint': {
@@ -117,16 +137,20 @@ function handleCommand(ctx, name, args) {
       if (!task) return context('[mentor] /mentor:done was typed, but no task is open in this project.', lib.t(cfg, 'noTask'));
       const minutes = Math.round((task.activeMs || 0) / 60000);
       const wallMinutes = Math.round((now - task.startedAt) / 60000);
-      const review = lib.reviewDiff(proj, cfg, task.baseline, task.pausedFiles || []);
+      const review = lib.reviewDiff(proj, cfg, task.baseline, task.pausedFiles || [], task.scope);
       const changed = review ? review.stat !== '' : null;
       const pausedWork = task.pausedWork || 0;
       const mode = task.mode || lib.modeOf(cfg, state);
       lib.logEvent(proj, 'task_done', {
         title: task.title, hint: task.hint, mode, minutes, wallMinutes, changed, pausedWork, learned: args || '',
+        ...(task.topics ? { topics: task.topics } : {}), ...(task.scope ? { scope: task.scope } : {}),
+        ...(task.transfer ? { transfer: true } : {}),
       });
       lib.appendLearning(
         `## ${lib.localDate(now)} — ${task.title}\n` +
-        `- hints: ${task.hint}/${lib.MAX_HINT} (${lib.LEVELS.en[task.hint]}) · ${minutes} min of work · mode ${mode}\n` +
+        `- hints: ${task.hint}/${lib.MAX_HINT} (${lib.LEVELS.en[task.hint]}) · ${minutes} min of work · mode ${mode}` +
+        (task.topics ? ` · topics ${task.topics.join(', ')}` : '') + (task.transfer ? ' · transfer exercise' : '') + '\n' +
+        (task.scope ? `- my part: ${task.scope.join(', ')} (the rest may be Claude's)\n` : '') +
         (pausedWork ? `- ${pausedWork} lines changed during a pause (normal mode), not counted as mine\n` : '') +
         (args ? `- in my words: ${args}\n` : ''));
       state.task = null;
@@ -142,7 +166,11 @@ function handleCommand(ctx, name, args) {
           ? ` ${pausedWork} lines in ${task.pausedFiles.join(', ')} changed while mentor mode was paused, when you may have ` +
             'written code yourself. Do not review that part as the user\'s work, and do not call the task done alone; ' +
             'ask the user which parts are theirs.'
-          : '');
+          : '') +
+        (task.scope ? ` The user's scope was ${task.scope.join(', ')}: review the files inside it as their work; files ` +
+          'outside it may be yours, so do not credit them to the user.' : '') +
+        (mode === 'explain' ? ' In explain mode you wrote code on purpose: end with two questions that check the ' +
+          'user understands it, instead of a review of their code.' : '');
       if (review) {
         const base = review.base === lib.EMPTY_TREE
           ? 'the empty tree (no commits yet)'
@@ -207,6 +235,36 @@ function handleCommand(ctx, name, args) {
       return context(lib.statusLine(cfg, proj, state), lib.t(cfg, 'wrongNoted'));
     }
 
+    case 'checkpoint': {
+      // A short test without AI: start with a topic, finish with the score. Logged with the time,
+      // so the trend per topic does not depend on how Claude grades anything.
+      const done = args.match(/^done\s+(\d+)\s*\/\s*(\d+)\s*$/i);
+      if (done) {
+        const cp = state.checkpoint;
+        if (!cp) return context(lib.statusLine(cfg, proj, state), lib.t(cfg, 'checkpointNone'));
+        const solved = Number(done[1]);
+        const total = Number(done[2]);
+        const minutes = Math.round((now - cp.startedAt) / 60000);
+        lib.logEvent(proj, 'checkpoint_done', { topic: cp.topic, solved, total, minutes });
+        lib.appendLearning(`## Checkpoint ${cp.topic} ${lib.localDate(now)}\n- result: ${solved}/${total} in ${minutes} min, without AI\n`);
+        state.checkpoint = null;
+        save();
+        return context(`[mentor] Checkpoint on "${cp.topic}" finished: ${solved}/${total} in ${minutes} min, without AI. ` +
+          `Recorded in the log and the journal ${lib.LEARNING_FILE}.\n${lib.statusLine(cfg, proj, state)}`,
+        lib.t(cfg, 'checkpointDone', { topic: cp.topic, solved, total, min: minutes }));
+      }
+      const topic = args.trim().toLowerCase();
+      if (!topic) return context(lib.statusLine(cfg, proj, state), lib.t(cfg, 'checkpointUsage'));
+      state.checkpoint = { topic, startedAt: now };
+      lib.logEvent(proj, 'checkpoint_start', { topic });
+      save();
+      const previous = lib.readEvents(0).filter((e) => e.type === 'checkpoint_done' && e.topic === topic);
+      return context(`[mentor] Checkpoint started on "${topic}". ` +
+        (previous.length ? `Earlier checkpoints on it: ${previous.map((p) => `${p.ts.slice(0, 10)} ${p.solved}/${p.total} in ${p.minutes} min`).join(', ')}. ` +
+          'Make the exercises as hard as last time, but different.' : 'This is the first one on this topic: it is the baseline.') +
+        `\n${lib.statusLine(cfg, proj, state)}`, lib.t(cfg, 'checkpointStarted', { topic }));
+    }
+
     case 'forget': {
       const what = args.toLowerCase();
       if (what === 'all' || what === 'text' || /^\d+$/.test(what)) {
@@ -265,7 +323,10 @@ function attempt(ctx) {
   const { cfg, proj, state, input } = ctx;
   const mode = lib.modeOf(cfg, state);
   const task = state.task;
-  if (mode === 'read') return { ok: true };
+  if (mode === 'read' || mode === 'explain') return { ok: true };
+  // With a scope the edit block on the user's part does the work: a prompt cannot be mapped to
+  // paths, and asking Claude for the routine rest is the point of the scope.
+  if (task && task.scope && task.scope.length) return { ok: true };
   if (task && task.attempted) return { ok: true };
   if (mode === 'debug') return { ok: false, debug: true };
   if (!proj.git) return { ok: true }; // outside git there is nothing to compare against

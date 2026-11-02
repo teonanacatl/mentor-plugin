@@ -229,6 +229,9 @@ const EDIT_REASON =
 const TAMPER_REASON =
   "Mentor mode: Claude does not change mentor's state, Claude Code's settings or installed plugins, and does not run " +
   'anything from those places. Only the user can pause or disable mentor mode, with /mentor:off <reason> or in /plugin.';
+const SCOPE_REASON =
+  "Mentor mode: this file is inside the user's scope for the task, the part they write themselves. " +
+  'Point to the place and explain what to change and why at the current hint level; outside the scope you may edit.';
 const ERROR_REASON =
   "Mentor mode: the mentor hook failed, so this file change is denied to be safe (details in the plugin's errors.log). " +
   'Tell the user; they can disable the plugin if it keeps happening.';
@@ -276,19 +279,33 @@ function main() {
     process.exit(0);
   }
 
+  // Claude may write a project file in explain mode, or outside the task's scope (the routine rest).
+  const inProject = (p) => Boolean(inside(proj.dir, path.resolve(cwd, p)));
+  const assisted = (p) => inProject(p) && lib.assistAllowed(cfg, state, rel(p));
+
   if (EDIT_TOOLS.has(tool)) {
     if (editFile && isAllowedPath(editFile, cwd)) process.exit(0);
-    lib.logEvent(proj, 'edit_block', { tool, file: editFile ? rel(editFile) : '' });
-    decide('deny', EDIT_REASON);
+    if (editFile && assisted(editFile)) {
+      lib.logEvent(proj, 'assist_edit', { tool, file: rel(editFile) });
+      process.exit(0);
+    }
+    lib.logEvent(proj, 'edit_block', { tool, file: editFile ? rel(editFile) : '', ...(state.task && state.task.scope ? { inScope: true } : {}) });
+    decide('deny', state.task && state.task.scope ? SCOPE_REASON : EDIT_REASON);
   }
 
-  const blocked = mcpTargets.find((p) => !isAllowedPath(p, cwd));
+  const blocked = mcpTargets.find((p) => !isAllowedPath(p, cwd) && !assisted(p));
   if (blocked) {
     lib.logEvent(proj, 'edit_block', { tool, file: rel(blocked) });
-    decide('deny', EDIT_REASON);
+    decide('deny', state.task && state.task.scope ? SCOPE_REASON : EDIT_REASON);
   }
+  for (const p of mcpTargets.filter(assisted)) lib.logEvent(proj, 'assist_edit', { tool, file: rel(p) });
 
-  if (cfg.bashGuard !== 'off' && commands.some(looksLikeWrite)) {
+  // In explain mode Claude writes on purpose; with a scope only commands naming the scope are guarded.
+  const mode = lib.modeOf(cfg, state);
+  const prefixes = state.task && state.task.scope ? lib.scopePrefixes(state.task.scope) : null;
+  const guarded = (c) => mode !== 'explain' && looksLikeWrite(c) &&
+    (!prefixes || prefixes.length < state.task.scope.length || prefixes.some((p) => c.replace(/\\/g, '/').includes(p)));
+  if (cfg.bashGuard !== 'off' && commands.some(guarded)) {
     if (cfg.bashGuard === 'deny') {
       lib.logEvent(proj, 'shell_block', { tool, ...lib.logText(cfg, commands.join(' '), 'command', 120) });
       decide('deny', EDIT_REASON + ' This command looks like it writes files.');

@@ -7,6 +7,8 @@
     "test": "node --test",
     "validate": "claude plugin validate --strict ./plugins/mentor && claude plugin validate --strict .",
     "eval": "node scripts/run-evals.js --allow-tools Edit Write --json plugins/mentor/evals/results/last.json",
-    "eval:free": "node scripts/run-evals.js --case gate-stops-an-order --runs 1 --ablation none"
+    "eval:free": "node scripts/run-evals.js --case gate-stops-an-order --runs 1 --ablation none",
+    "eval:ablation": "node scripts/run-evals.js --variant all --allow-tools Edit Write",
+    "eval:compare": "node scripts/run-evals.js --compare"
   }
 }

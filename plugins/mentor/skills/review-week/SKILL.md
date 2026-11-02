@@ -9,7 +9,13 @@ the statistics from the events log into the `[mentor] Stats` lines of this promp
 
 ## 1. Review
 
-In the user's language, short and factual, no praise inflation and no guilt:
+In the user's language, short and factual, no praise inflation and no guilt. **Start with the
+person, not the tool:**
+- the skill measures first, the ones no model judged: per topic, how much help each task needed
+  over time (for example `rxjs: 3 → 2 → 1` means the user needs less help), transfer exercises
+  done as real tasks and their hint level, and checkpoints without AI. Say which topics improve,
+  which do not, and where there is too little data to tell; suggest `#topic` tags or a
+  `/mentor:checkpoint` where a measure is missing;
 - how many tasks were closed, how much work time, and at which hint level they usually ended
   (level 0 means alone);
 - how many times the gate stopped a request for ready-made code, and how often the user

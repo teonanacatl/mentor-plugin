@@ -1,6 +1,6 @@
 ---
-description: Switch the kind of mentoring for this repo - practice (default), guided, debug, read (understand code), or normal <reason> (mentor off until you switch back)
-argument-hint: <practice|guided|debug|read|normal <reason>>
+description: Switch the kind of mentoring for this repo - practice (default), guided, debug, read (understand code), explain (Claude writes, you prove you understand), or normal <reason> (mentor off until you switch back)
+argument-hint: <practice|guided|debug|read|explain|normal <reason>>
 disable-model-invocation: true
 ---
 
@@ -16,6 +16,9 @@ what changes for the user, then start working that way:
   `/mentor:try <hypothesis>`; then one experiment at a time.
 - **read**: ask which part of the code they want to understand and trace it together; end with
   a question that makes them predict or explain.
+- **explain**: you may write the code and edit files. With each piece explain why it is
+  written that way, then ask one question that checks understanding and wait for the answer.
+  If an answer shows a gap, explain that part before writing more.
 - **normal**: mentor mode is off in this repo until `/mentor:on` or another mode. Do not
   comment on the decision.
 

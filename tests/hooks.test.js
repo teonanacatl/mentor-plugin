@@ -1013,3 +1013,97 @@ test('session start passes the topic profile from the Leitner boxes', () => {
   assert.match(text, /already knows Angular signals, closures; still weak: RxJS switchMap/);
   assert.match(text, /0 repetition topic\(s\), 1 transfer exercise\(s\)/);
 });
+
+// --- 0.7.0 ---
+
+test('a learning scope: the user writes the --mine part, Claude may write the rest', () => {
+  const s = setup();
+  fs.mkdirSync(path.join(s.repo, 'src', 'parser'), { recursive: true });
+  const started = s.prompt('/mentor:task parser nagłówków #rxjs --mine src/parser/**');
+  assert.match(started.json.systemMessage, /Twoja część: src\/parser\/\*\* — resztę może pisać Claude/);
+  assert.match(ctx(started), /the user's scope: src\/parser\/\*\*.*ask one question that checks/);
+  assert.deepStrictEqual(s.state().task.scope, ['src/parser/**']);
+  assert.deepStrictEqual(s.state().task.topics, ['rxjs']);
+
+  assert.strictEqual(s.decision('Edit', { file_path: path.join(s.repo, 'src', 'parser', 'header.ts') }), 'deny', 'inside the scope');
+  const denied = s.tool('Edit', { file_path: path.join(s.repo, 'src', 'parser', 'header.ts') });
+  assert.match(denied.json.hookSpecificOutput.permissionDecisionReason, /inside the user's scope/);
+  for (const f of ['app.js', path.join('src', 'config.ts'), path.join('test', 'helpers.ts'), 'webpack.config.js']) {
+    assert.strictEqual(s.tool('Write', { file_path: path.join(s.repo, f), content: 'x' }).stdout, '', `outside the scope: ${f}`);
+  }
+  assert.strictEqual(s.decision('Write', { file_path: path.join(s.config, 'settings.json') }), 'deny', 'protection stays');
+  assert.strictEqual(s.decision('mcp__fs__write_file', { path: 'src/parser/a.ts' }), 'deny');
+  assert.strictEqual(s.tool('mcp__fs__write_file', { path: 'src/util.ts' }).stdout, '');
+  assert.ok(s.events().filter((e) => e.type === 'assist_edit').length >= 5);
+
+  assert.strictEqual(s.prompt('napisz konfigurację webpacka').code, 0, 'no gate with a scope');
+  assert.strictEqual(s.tool('Bash', { command: 'npx prettier -w webpack.config.js' }).stdout, '', 'shell outside the scope');
+  assert.strictEqual(s.decision('Bash', { command: "sed -i 's/a/b/' src/parser/header.ts" }), 'ask', 'shell naming the scope');
+
+  s.append('src/parser/header.ts', lines(5, 'mine'));
+  s.append('app.js', lines(5, 'claude wiring'));
+  const done = ctx(s.prompt('/mentor:done'));
+  assert.match(done, /src\/parser\/header\.ts \| \+5 -0 \(new, untracked\) \(the user's scope\)/);
+  assert.match(done, /app\.js \| \+5 -0 \(outside the user's scope: may be Claude's\)/);
+  assert.match(fs.readFileSync(path.join(s.data, 'LEARNING.md'), 'utf8'), /my part: src\/parser\/\*\*/);
+});
+
+test('explain mode: Claude writes code and checks understanding; not counted as solved alone', () => {
+  const s = setup();
+  s.prompt('/mentor:mode explain');
+  assert.match(ctx(s.prompt('co dalej?')), /mode explain: you may write code.*one question that checks/);
+  assert.strictEqual(s.tool('Edit', { file_path: path.join(s.repo, 'app.js') }).stdout, '');
+  assert.strictEqual(s.prompt('napisz to').code, 0);
+  assert.strictEqual(s.tool('Bash', { command: "sed -i 's/a/b/' app.js" }).stdout, '', 'no shell guard either');
+  s.prompt('/mentor:task wyjaśnij mi strumienie #rxjs');
+  assert.match(ctx(s.prompt('/mentor:done')), /In explain mode you wrote code on purpose/);
+  assert.match(ctx(s.prompt('/mentor:review-week')), /closed tasks by highest hint level \(without work from pauses\): 0 none: 0/);
+});
+
+test('the kind of work is read from the task title unless given', () => {
+  const s = setup();
+  const bug = s.prompt('/mentor:task błąd: strumień gubi zdarzenia po reconnect');
+  assert.match(bug.json.systemMessage, /tryb debug \(z tytułu/);
+  assert.strictEqual(s.state().task.mode, 'debug');
+  s.prompt('/mentor:task jak działa moduł routingu');
+  assert.strictEqual(s.state().task.mode, 'read');
+  s.prompt('/mentor:task formularz rejestracji');
+  assert.strictEqual(s.state().task.mode, 'practice');
+  s.prompt('/mentor:task naprawa crasha --mode practice');
+  assert.strictEqual(s.state().task.mode, 'practice', '--mode wins over the title');
+  s.prompt('/mentor:mode guided');
+  s.prompt('/mentor:task kolejny bug w parserze');
+  assert.strictEqual(s.state().task.mode, 'guided', 'a repo mode set with /mentor:mode wins over the title');
+});
+
+test('the help each topic needs is shown task by task; transfer tasks are measured', () => {
+  const s = setup();
+  s.env.CLAUDE_PLUGIN_OPTION_FOCUS_TOPICS = 'RxJS, signals';
+  for (const hints of [3, 2, 1]) {
+    s.prompt('/mentor:task operator switchMap w RxJS');
+    for (let i = 0; i < hints; i++) s.prompt('/mentor:hint');
+    s.prompt('/mentor:done');
+  }
+  s.prompt('/mentor:task ćwiczenie: drugi strumień #transfer #rxjs');
+  s.prompt('/mentor:done');
+  const review = ctx(s.prompt('/mentor:review-week'));
+  assert.match(review, /help needed per topic.*rxjs: 3 → 2 → 1 → 0/);
+  assert.match(review, /transfer exercises done as tasks: "ćwiczenie: drugi strumień" hint 0/);
+});
+
+test('a checkpoint without AI is timed and recorded per topic', () => {
+  const s = setup();
+  assert.match(s.prompt('/mentor:checkpoint').json.systemMessage, /checkpoint <temat>/);
+  assert.match(s.prompt('/mentor:checkpoint done 1/3').json.systemMessage, /Nie trwa żaden sprawdzian/);
+  const start = s.prompt('/mentor:checkpoint RxJS');
+  assert.match(start.json.systemMessage, /Sprawdzian bez AI: rxjs/);
+  assert.match(ctx(start), /first one on this topic: it is the baseline/);
+  assert.match(ctx(s.prompt('pomóż mi z zadaniem 2')), /CHECKPOINT in progress on "rxjs".*Do not give hints/);
+  const st = s.state();
+  st.checkpoint.startedAt -= 25 * 60000;
+  s.writeState(st);
+  assert.match(s.prompt('/mentor:checkpoint done 2/3').json.systemMessage, /rxjs: 2\/3 w 25 min/);
+  assert.match(fs.readFileSync(path.join(s.data, 'LEARNING.md'), 'utf8'), /## Checkpoint rxjs .*\n- result: 2\/3 in 25 min, without AI/);
+  assert.match(ctx(s.prompt('/mentor:checkpoint rxjs')), /Earlier checkpoints on it: .* 2\/3 in 25 min/);
+  assert.match(ctx(s.prompt('/mentor:review-week')), /checkpoints without AI: rxjs: \d{4}-\d\d-\d\d 2\/3 in 25 min/);
+});
