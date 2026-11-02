@@ -1,7 +1,7 @@
 'use strict';
 // End-to-end tests of the hook scripts: each runs as Claude Code would run it,
 // with JSON on stdin, against a throwaway git repo and data directory.
-// Run: node --test tests/
+// Run: node --test
 
 const test = require('node:test');
 const assert = require('node:assert');

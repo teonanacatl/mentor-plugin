@@ -358,15 +358,30 @@ function appendLearning(entry) {
   fs.appendFileSync(LEARNING_FILE, '\n' + entry.trim() + '\n');
 }
 
+// Synchronous write that survives process.exit(). process.stdout.write is asynchronous
+// for pipes on macOS, so a large result (a review with its diff) got cut off on exit.
+function writeAll(fd, text) {
+  const buf = Buffer.from(text);
+  let off = 0;
+  while (off < buf.length) {
+    try {
+      off += fs.writeSync(fd, buf, off);
+    } catch (err) {
+      if (err.code !== 'EAGAIN') throw err;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5); // pipe full, let the reader drain it
+    }
+  }
+}
+
 // Prints a hook JSON result and exits 0.
 function respond(obj) {
-  process.stdout.write(JSON.stringify(obj));
+  writeAll(1, JSON.stringify(obj));
   process.exit(0);
 }
 
 // Blocks the prompt; the message is shown to the user, not to Claude.
 function blockPrompt(message) {
-  process.stderr.write(message + '\n');
+  writeAll(2, message + '\n');
   process.exit(2);
 }
 

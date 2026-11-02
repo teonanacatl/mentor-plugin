@@ -139,7 +139,7 @@ from the conversation and goes one level up, or takes the level you give (`/ment
 CI runs the hook tests on Linux, macOS and Windows with Node 20 and 22.
 
 ```
-node --test tests/
+node --test
 claude plugin validate ./plugins/mentor
 claude plugin validate .
 ```
