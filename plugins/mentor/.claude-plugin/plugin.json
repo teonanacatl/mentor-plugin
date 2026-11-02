@@ -1,7 +1,7 @@
 {
   "name": "mentor",
   "displayName": "Mentor",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Mentor mode: Claude points the way instead of writing your code. Blocks file edits, gates requests for ready-made code until you have tried, escalates hints step by step and reviews your week.",
   "author": {
     "name": "Przemysław Lewalski"
@@ -16,6 +16,18 @@
       "title": "Language of hook messages",
       "description": "pl or en. Empty = from the system locale. Claude itself answers in the language you write in.",
       "default": ""
+    },
+    "default_mode": {
+      "type": "string",
+      "title": "Default kind of work",
+      "description": "practice (you solve it, hints on request), guided (Claude leads in small steps), debug (hypothesis and experiments; the gate opens with /mentor:try) or read (understanding code, no gate). Change per repo with /mentor:mode.",
+      "default": "practice"
+    },
+    "log_text": {
+      "type": "boolean",
+      "title": "Keep your text in the events log",
+      "description": "Off: the log keeps only the length of prompts, commands and hypotheses, never their text, so no code or confidential prompt ends up there. On: the first 120–200 characters are kept.",
+      "default": false
     },
     "activation": {
       "type": "string",

@@ -46,6 +46,24 @@ const LEVEL_SCOPE = [
   'sketch: a skeleton or pseudocode with the key lines left as TODO for the user, never a complete working solution',
 ];
 
+// Kinds of work, each with its own rules. "normal" is not a mode in the state: it is a pause
+// without an end (/mentor:mode normal <reason>), so it is logged and counted like one.
+const MODES = ['practice', 'guided', 'debug', 'read'];
+const MODE_SCOPE = {
+  practice: 'practice: the user solves it; answer questions and give hints on the ladder, never the solution',
+  guided: 'guided: lead step by step. Break the task into small steps and give one at a time as a question or a ' +
+    'small goal; check the user\'s answer before the next step. Still no code for the user\'s task',
+  debug: 'debug: teach the debugging loop. Ask for the symptom and the user\'s hypothesis, propose one experiment ' +
+    '(a log, a breakpoint, a test) the user runs, analyse the result together, repeat. The fix comes from the user. ' +
+    'The try-first gate opens only with a hypothesis (/mentor:try)',
+  read: 'read: understanding existing code. Explain freely and in depth, trace the flow with the user, then ask them ' +
+    'to predict what a change would do or to explain a part back in their own words. No gate; edits stay blocked',
+};
+// Events carry this version, so later readers can tell old shapes from new ones.
+const EVENT_V = 2;
+// Fields of events that may hold the user's text (prompts, commands, hypotheses).
+const TEXT_FIELDS = ['prompt', 'text', 'arg', 'command', 'target', 'why'];
+
 // Generated files, lock files and build output do not count as the user's attempt and stay out of
 // the review diff. gitignore-like: a leading "/" (or a slash inside) anchors at the repo root, so
 // /build/ skips the build output but not scripts/build/. Ignored files are left out by git anyway.
@@ -68,7 +86,7 @@ const DEFAULT_GATE = [
     `rozwi[aą][zż]|dodaj|zrefaktoryzuj|zrefaktoruj|przer[oó]b)${E}`,
   `${B}popraw${E}(?!\\s+mnie)`,
   `${B}(daj|poka[zż])\\s+(mi\\s+)?(ca[lł]y\\s+kod|gotowy\\s+kod|gotowca|gotowe|rozwi[aą]zanie)${E}`,
-  `${B}zr[oó]b\\s+(to|mi)${E}`,
+  `${B}zr[oó]b\\s+(to|mi\\s+to|za\\s+mnie)${E}`, // "zrób mi review" is not a request for code
   `${B}(mo[zż]esz|m[oó]g[lł]by[sś]|mog[lł]aby[sś])\\s+(mi\\s+)?(to\\s+)?(napisa[cć]|zaimplementowa[cć]|naprawi[cć]|poprawi[cć]|` +
     `dopisa[cć]|stworzy[cć]|doko[nń]czy[cć]|zrobi[cć]|rozwi[aą]za[cć]|doda[cć]|przerobi[cć]|zrefaktoryzowa[cć])${E}`,
   `${B}(napiszesz|naprawisz|poprawisz|zrobisz|dopiszesz)\\s+(mi|to)${E}`,
@@ -130,8 +148,21 @@ const MESSAGES = {
       '  • /mentor:hint — wziąć kolejny poziom podpowiedzi\n' +
       '  • /mentor:try <hipoteza> — opisać własną diagnozę albo to, co już zrobiłeś (bez edycji plików)\n' +
       '  • zapisać w kodzie choćby szkic, a potem poprosić o review\n' +
+      '  • /mentor:wrong — jeśli to nie była prośba o kod (zapiszę fałszywą blokadę i przepuszczę następny prompt)\n' +
       '  • /mentor:off <powód> — zrobić przerwę na {min} min (trafia do przeglądu tygodnia)',
     whyTask: 'Od startu zadania „{task}” w kodzie zmieniło się {n} z wymaganych {need} linii.',
+    whyDebug: 'W trybie debugowania bramkę otwiera hipoteza: /mentor:try <co podejrzewasz i jak to sprawdzisz>.',
+    wrongNoted: '🧭 Zapisane jako fałszywa blokada. Następny prompt przejdzie bez bramki — wyślij go jeszcze raz.',
+    wrongNothing: '🧭 W tym repo nie było ostatnio blokady do odwołania.',
+    modeSet: '🧭 Tryb: {mode}.',
+    modeUnknown: '🧭 Tryby: practice, guided, debug, read, normal <powód>. Teraz: {mode}.',
+    modeNormal: '🧭 Tryb normalny w tym repo, bez limitu czasu. Powód: {reason}. Powrót: /mentor:on albo /mentor:mode practice.',
+    modeNeedsReason: '🧭 Mentor: tryb normalny też wymaga powodu, np. /mentor:mode normal rutynowa migracja.',
+    hintSet: '🧭 Podpowiedź ustawiona na {n}/{max} · {name}',
+    hintReset: '🧭 Drabina od zera.',
+    forgotten: '🧭 Log: usunięto {n} zdarzeń.',
+    forgottenText: '🧭 Log: usunięto treść z {n} zdarzeń (zostały typy, czasy i liczby).',
+    forgetUsage: '🧭 /mentor:forget all | /mentor:forget <dni> (starsze niż N dni) | /mentor:forget text (sama treść).',
     whySession: 'Od początku tej sesji w kodzie zmieniło się {n} z wymaganych {need} linii (pliki generowane i lockfile się nie liczą).',
     offNeedsReason: '🧭 Mentor: podaj powód przerwy, np. /mentor:off pilny hotfix. Powód trafia do przeglądu tygodnia.',
     offNeedsLonger: '🧭 Mentor: to {n}. przerwa dzisiaj. Opisz powód pełniej, co najmniej {need} znaków: co jest pilne i czemu teraz.',
@@ -161,8 +192,21 @@ const MESSAGES = {
       '  • /mentor:hint — take the next hint level\n' +
       '  • /mentor:try <hypothesis> — describe your own diagnosis or what you already did (no file edits needed)\n' +
       '  • write even a rough draft in the code, then ask for a review\n' +
+      '  • /mentor:wrong — if it was not a request for code (logged as a false block; your next prompt goes through)\n' +
       '  • /mentor:off <reason> — pause for {min} min (shows up in the weekly review)',
     whyTask: 'Since task "{task}" started, {n} of the required {need} lines of code have changed.',
+    whyDebug: 'In debug mode a hypothesis opens the gate: /mentor:try <what you suspect and how you will check it>.',
+    wrongNoted: '🧭 Logged as a false block. Your next prompt skips the gate — send it again.',
+    wrongNothing: '🧭 No recent block in this repo to take back.',
+    modeSet: '🧭 Mode: {mode}.',
+    modeUnknown: '🧭 Modes: practice, guided, debug, read, normal <reason>. Now: {mode}.',
+    modeNormal: '🧭 Normal mode in this repo, no time limit. Reason: {reason}. Back: /mentor:on or /mentor:mode practice.',
+    modeNeedsReason: '🧭 Mentor: normal mode needs a reason too, e.g. /mentor:mode normal routine migration.',
+    hintSet: '🧭 Hint set to {n}/{max} · {name}',
+    hintReset: '🧭 The ladder starts from zero.',
+    forgotten: '🧭 Log: {n} events removed.',
+    forgottenText: '🧭 Log: text removed from {n} events (types, times and counts stay).',
+    forgetUsage: '🧭 /mentor:forget all | /mentor:forget <days> (older than N days) | /mentor:forget text (only the text).',
     whySession: 'Since this session started, {n} of the required {need} lines of code have changed (generated files and lock files do not count).',
     offNeedsReason: '🧭 Mentor: give a reason for the pause, e.g. /mentor:off urgent hotfix. It shows up in the weekly review.',
     offNeedsLonger: '🧭 Mentor: this is pause no. {n} today. Describe the reason more fully, at least {need} characters: what is urgent and why now.',
@@ -232,7 +276,16 @@ function config() {
     ignore: String(option('attempt_ignore', '')).split(',').map((s) => s.trim()).filter(Boolean),
     keepDays: intOption('keep_days', 90, 7, 3650),
     chatCodeLines: intOption('chat_code_lines', 15, 3, 500),
+    logText: !isOff(option('log_text', 'false')),
+    defaultMode: MODES.includes(option('default_mode', 'practice')) ? option('default_mode', 'practice') : 'practice',
   };
+}
+
+// The user's text goes into the log only with log_text on; otherwise only its length, so the log
+// never holds code or confidential prompts. The journal (written by the user and Claude) is separate.
+function logText(cfg, text, field = 'text', limit = 200) {
+  const s = String(text || '');
+  return cfg.logText ? { [field]: s.slice(0, limit) } : { [field + 'Chars']: s.length };
 }
 
 // The user's own pattern is compiled without the `u` flag, so plain regexes keep working.
@@ -354,8 +407,11 @@ function loadState(proj) {
   return {
     key: proj.key, pause: s.pause || null, task: s.task || null,
     sessions: s.sessions || {}, enabled: Boolean(s.enabled),
+    mode: MODES.includes(s.mode) ? s.mode : null, passOnce: Boolean(s.passOnce),
   };
 }
+
+const modeOf = (cfg, state) => state.mode || cfg.defaultMode;
 
 function saveState(proj, state) {
   ensureDir(STATE_DIR);
@@ -367,8 +423,53 @@ function saveState(proj, state) {
 
 function logEvent(proj, type, data = {}) {
   ensureDir();
-  const line = JSON.stringify({ ts: new Date().toISOString(), type, project: proj.name, pid: proj.id, ...data });
+  const line = JSON.stringify({ v: EVENT_V, ts: new Date().toISOString(), type, project: proj.name, pid: proj.id, ...data });
   fs.appendFileSync(EVENTS_FILE, line + '\n');
+}
+
+// /mentor:forget: drops every event, events older than `days`, or only the user's text in them.
+function forgetEvents(what, now = Date.now()) {
+  if (!fs.existsSync(EVENTS_FILE)) return 0;
+  const lines = fs.readFileSync(EVENTS_FILE, 'utf8').split('\n').filter((l) => l.trim());
+  let kept = lines;
+  let n = 0;
+  if (what === 'all') {
+    kept = [];
+    n = lines.length;
+  } else if (what === 'text') {
+    kept = lines.map((l) => {
+      try {
+        const e = JSON.parse(l);
+        let touched = false;
+        for (const f of TEXT_FIELDS) {
+          if (typeof e[f] === 'string') {
+            e[f + 'Chars'] = e[f].length;
+            delete e[f];
+            touched = true;
+          }
+        }
+        if (touched) n++;
+        return JSON.stringify(e);
+      } catch {
+        n++;
+        return null; // a damaged line may hold anything
+      }
+    }).filter(Boolean);
+  } else {
+    const cutoff = now - Number(what) * 86400000;
+    kept = lines.filter((l) => {
+      try {
+        return Date.parse(JSON.parse(l).ts) >= cutoff;
+      } catch {
+        return false;
+      }
+    });
+    n = lines.length - kept.length;
+  }
+  const tmp = EVENTS_FILE + '.' + process.pid + '.tmp';
+  fs.writeFileSync(tmp, kept.length ? kept.join('\n') + '\n' : '');
+  fs.renameSync(tmp, EVENTS_FILE);
+  return n;
 }
 
 function logError(where, err) {
@@ -478,13 +579,13 @@ function isActive(cfg, proj, state) {
 
 // Starts a pause. The user's work so far stays theirs (it opens the gate if it is enough), and a
 // snapshot marks where the pause began, so what appears during it is told apart later.
-function startPause(proj, cfg, state, reason, until) {
+function startPause(proj, cfg, state, reason, until, indefinite = false) {
   const task = state.task;
   if (task && proj.git && !task.attempted && attemptLines(proj, cfg, task.attemptBaseline || task.baseline) >= cfg.minLines) {
     task.attempted = true;
   }
   const baseline = (state.pause && state.pause.baseline) || (proj.git ? compact(snapshot(proj, cfg)) : null);
-  state.pause = { until, reason, baseline };
+  state.pause = { until, reason, baseline, ...(indefinite ? { indefinite: true } : {}) };
 }
 
 // Ends a pause (`/mentor:on`, or on its own when the time is up). Code that appeared during the
@@ -787,14 +888,16 @@ function statusLine(cfg, proj, state) {
       'Mentor mode does not apply here: normal assistant behaviour, file edits are allowed.';
   }
   if (isPaused(state)) {
-    return `[mentor] PAUSED in this project until ${fmtTime(cfg, state.pause.until)} (reason: ${state.pause.reason}). ` +
+    const until = state.pause.indefinite ? 'the user switches back (normal mode)' : fmtTime(cfg, state.pause.until);
+    return `[mentor] PAUSED in this project until ${until} (reason: ${state.pause.reason}). ` +
       'Mentor mode is off for now: normal assistant behaviour, file edits are allowed.';
   }
   const task = state.task;
+  const mode = modeOf(cfg, state);
   const taskPart = task
     ? `task: "${task.title}" · hint level ${task.hint}/${MAX_HINT} (${LEVELS.en[task.hint]})`
     : 'no task started (/mentor:task)';
-  return `[mentor] ACTIVE · ${taskPart} · file edits in the project are blocked by a hook.`;
+  return `[mentor] ACTIVE · ${taskPart} · mode ${MODE_SCOPE[mode]} · file edits in the project are blocked by a hook.`;
 }
 
 function readEvents(sinceMs) {
@@ -844,9 +947,31 @@ function stats(days) {
   for (const e of done) if (!(e.pausedWork > 0)) byLevel[Math.min(MAX_HINT, e.hint || 0)]++;
   const count = (type) => events.filter((e) => e.type === type).length;
   const workMinutes = done.reduce((sum, d) => sum + (d.minutes || 0), 0);
+  const own = done.filter((e) => !(e.pausedWork > 0));
+  const median = (xs) => {
+    if (!xs.length) return null;
+    const s = [...xs].sort((a, b) => a - b);
+    return s.length % 2 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2;
+  };
+  const blocks = events.filter((e) => e.type === 'gate_block');
+  // A block followed within five minutes by a pause in the same repo: the user went around it.
+  const overridden = blocks.filter((b) => pauses.some((p) => p.pid === b.pid &&
+    Date.parse(p.ts) >= Date.parse(b.ts) && Date.parse(p.ts) - Date.parse(b.ts) <= 5 * 60000)).length;
+  const pct = (a, b) => (b ? `${Math.round((100 * a) / b)}%` : 'n/a');
+  const j = journalStats(Date.now() - days * 86400000);
   const lines = [
     `[mentor] Stats for the last ${days} days (from ${EVENTS_FILE}):`,
     `- tasks started: ${count('task_start')}, closed: ${done.length}, work time on closed tasks: ${workMinutes} min`,
+    `- outcome measures:`,
+    `  - median work time per closed task: ${median(done.map((d) => d.minutes || 0)) ?? 'n/a'} min; ` +
+      `mean highest hint level (own work only): ${own.length ? (own.reduce((s, d) => s + (d.hint || 0), 0) / own.length).toFixed(1) : 'n/a'}`,
+    `  - false blocks (/mentor:wrong): ${count('false_block')} of ${blocks.length} gate stops (${pct(count('false_block'), blocks.length)}); ` +
+      `stops followed by a pause within 5 min: ${overridden} (${pct(overridden, blocks.length)})`,
+    `  - pauses per closed task: ${done.length ? (pauses.length / done.length).toFixed(1) : 'n/a'}`,
+    `  - delayed recall (quizzes in the journal): ${j.quizzes.length ? j.quizzes.map((q) => `${q.date} ${q.score}`).join(', ') : 'none'}`,
+    `  - transfer exercises: ${j.transfers.solvedAlone} solved alone, ${j.transfers.withHints} with hints, ` +
+      `${j.transfers.notSolved} not solved, ${j.transfers.open} open (${j.transfers.due} due)`,
+    `- tasks closed by mode: ${MODES.map((m) => `${m} ${done.filter((d) => (d.mode || 'practice') === m).length}`).join(', ')}`,
     `- closed tasks by highest hint level (without work from pauses): ` +
       byLevel.map((n, i) => `${i} ${LEVELS.en[i]}: ${n}`).join(', '),
     `- closed with code written during a pause (not counted above): ${withPause.length}` +
@@ -876,23 +1001,64 @@ function stats(days) {
   return lines.join('\n');
 }
 
+function readJournal() {
+  try {
+    return fs.readFileSync(LEARNING_FILE, 'utf8');
+  } catch {
+    return '';
+  }
+}
+
+const isDue = (line, today) => {
+  const due = line.match(/due (\d{4}-\d{2}-\d{2})/);
+  return !due || due[1] <= today;
+};
+
 // Open repetition items due today or earlier: `- [ ] repeat: topic (box N, due YYYY-MM-DD)`;
 // an item without a due date is due.
 function dueRepeats(now = Date.now()) {
-  let text = '';
-  try {
-    text = fs.readFileSync(LEARNING_FILE, 'utf8');
-  } catch {
-    return 0;
-  }
   const today = localDate(now);
-  let n = 0;
+  return readJournal().split('\n').filter((l) => /^\s*- (\[ \] )?repeat:/.test(l) && isDue(l, today)).length;
+}
+
+// Learning evidence from the journal, apart from activity: quiz scores and transfer exercises
+// (`- [ ] transfer: … (due …)`, ticked as `- [x] transfer: … (solved alone|with hints|not solved YYYY-MM-DD)`).
+function journalStats(sinceMs, now = Date.now()) {
+  const text = readJournal();
+  const since = localDate(sinceMs);
+  const today = localDate(now);
+  const quizzes = [];
+  const re = /^## Quiz (\d{4}-\d{2}-\d{2})[\s\S]*?^- score: (\d+\s*\/\s*\d+)/gm;
+  for (const m of text.matchAll(re)) if (m[1] >= since) quizzes.push({ date: m[1], score: m[2].replace(/\s/g, '') });
+  const t = { solvedAlone: 0, withHints: 0, notSolved: 0, skipped: 0, open: 0, due: 0 };
   for (const line of text.split('\n')) {
-    if (!/^\s*- (\[ \] )?repeat:/.test(line)) continue;
-    const due = line.match(/due (\d{4}-\d{2}-\d{2})/);
-    if (!due || due[1] <= today) n++;
+    if (!/^\s*- \[[ x]\] transfer:/.test(line)) continue;
+    if (/^\s*- \[ \]/.test(line)) {
+      t.open++;
+      if (isDue(line, today)) t.due++;
+    } else if (/solved alone/.test(line)) t.solvedAlone++;
+    else if (/with hints/.test(line)) t.withHints++;
+    else if (/skipped/.test(line)) t.skipped++;
+    else t.notSolved++;
   }
-  return n;
+  return { quizzes, transfers: t };
+}
+
+// The user's explicit topic profile, read from the Leitner boxes: what they already have
+// (box 4–5 or mastered) and what is still weak (box 1). Claude adapts the size of its steps.
+function topicProfile() {
+  const strong = [];
+  const weak = [];
+  for (const line of readJournal().split('\n')) {
+    const m = line.match(/^\s*- (\[([ x])\] )?repeat:\s*(.+?)\s*(\((.*)\))?\s*$/);
+    if (!m) continue;
+    const topic = m[3].trim();
+    const box = Number(((m[5] || '').match(/box (\d)/) || [])[1] || 1);
+    if (m[2] === 'x' || box >= 4) strong.push(topic);
+    else if (box <= 1) weak.push(topic);
+  }
+  const uniq = (xs) => [...new Set(xs)].slice(-6);
+  return { strong: uniq(strong), weak: uniq(weak.filter((w) => !strong.includes(w))) };
 }
 
 function appendLearning(entry) {
@@ -934,6 +1100,7 @@ module.exports = {
   DATA_DIR, EVENTS_FILE, LEARNING_FILE, MARKER, EMPTY_TREE, MAX_HINT, IDLE_MS, LEVELS, LEVEL_SCOPE, DEFAULT_GATE,
   PAUSES_BEFORE_LONG_REASON, LONG_REASON,
   config, gate, asksForCode, isQuestion, stripPasted, t, levelName, readInput, git, gitTry, project, loadState, saveState,
+  MODES, MODE_SCOPE, EVENT_V, logText, modeOf, forgetEvents, journalStats, topicProfile,
   lockState, logEvent, logError, pruneEvents, isEnabled, isPaused, isActive, startPause, endPause, expirePause, touchTask,
   fmtTime, localDate,
   headCommit, snapshot, compact, isCurrent, changedLines, attemptLines, effectiveBase, reviewDiff, hasSessionBaseline,

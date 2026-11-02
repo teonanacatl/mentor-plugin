@@ -261,7 +261,8 @@ function main() {
     mcpTargets.some((p) => isProtectedPath(p, cwd)) ||
     commands.some(isTamper);
   if (tampered) {
-    lib.logEvent(proj, 'tamper_block', { tool, target: editFile || mcpTargets[0] || commands.join(' ').slice(0, 120) });
+    const target = editFile || mcpTargets[0];
+    lib.logEvent(proj, 'tamper_block', { tool, ...(target ? { target } : lib.logText(cfg, commands.join(' '), 'command', 120)) });
     decide('deny', TAMPER_REASON);
   }
 
@@ -269,7 +270,9 @@ function main() {
     // Allowed, but the weekly review sees lasting instructions written while mentor mode was off.
     const lasting = [editFile, ...mcpTargets].filter((f) => f && isLastingInstruction(f, cwd));
     for (const f of lasting) lib.logEvent(proj, 'persist_write', { tool, file: f });
-    for (const c of commands.filter(writesLasting)) lib.logEvent(proj, 'persist_write', { tool, file: c.slice(0, 120) });
+    for (const c of commands.filter(writesLasting)) {
+      lib.logEvent(proj, 'persist_write', { tool, file: '(shell command)', ...lib.logText(cfg, c, 'command', 120) });
+    }
     process.exit(0);
   }
 
@@ -287,7 +290,7 @@ function main() {
 
   if (cfg.bashGuard !== 'off' && commands.some(looksLikeWrite)) {
     if (cfg.bashGuard === 'deny') {
-      lib.logEvent(proj, 'shell_block', { tool, command: commands.join(' ').slice(0, 120) });
+      lib.logEvent(proj, 'shell_block', { tool, ...lib.logText(cfg, commands.join(' '), 'command', 120) });
       decide('deny', EDIT_REASON + ' This command looks like it writes files.');
     }
     decide('ask', lib.t(cfg, 'bashAsk'));

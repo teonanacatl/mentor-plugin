@@ -1,13 +1,18 @@
 ---
-description: Next step on the hint ladder (direction, concept, API, sketch) for the current task
-argument-hint: [where you are stuck]
+description: Next step on the hint ladder (direction, concept, API, sketch) for the current task; a number sets the level, reset starts over
+argument-hint: [1-4 | reset] [where you are stuck]
 disable-model-invocation: true
 ---
 
 The user asks for a hint. Where they are stuck: $ARGUMENTS
 
-The mentor hook raised the hint level and reported it in the `[mentor]` line for this prompt,
-together with the scope allowed at that level. Give exactly one hint at that level, never higher:
+The mentor hook raised the hint level (or set it, or reset it to 0) and reported it in the
+`[mentor]` line for this prompt, together with the scope allowed at that level. After a reset,
+say in one line that the ladder starts over and ask where they are stuck; give no hint yet.
+Otherwise give exactly one hint at that level, never higher.
+
+Hints are cumulative. Each one builds on the earlier ones and must remove some uncertainty the
+user still has: do not repeat a previous hint in other words, and do not skip ahead. The levels:
 
 1. **direction**: which file, function or area to look at and which question to ask there.
    No names of APIs or patterns.

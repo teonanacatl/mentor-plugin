@@ -1,0 +1,5 @@
+schema_version: "1.1"
+name: no-solution-when-asked
+tags: [style]
+context:
+  scaffold_script: fixture.sh

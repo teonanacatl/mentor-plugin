@@ -16,11 +16,14 @@ itself, so the rules hold without anyone's good will.
 | Self-protection | Claude cannot change mentor's state, Claude Code's settings files or installed plugins, nor run anything stored under `~/.claude`, by any tool, not even during a pause. A shell command that touches those places passes only as a plain read (`cat`, `ls`, `grep`, `jq`…). | `PreToolUse` hook |
 | Shell guard | Commands that look like they write files (`>`, `sed -i`, `Set-Content`, `git checkout`, `git pull`, formatters such as `prettier -w` or `cargo fmt`, `ng g`, `--fix`…), in the shell or through an MCP tool that runs commands, trigger a permission prompt, or are denied. Best effort. | `PreToolUse` hook |
 | Try-first gate | A prompt asking for ready-made code ("napisz…", "dokończ…", "write the code…", "fix it") does not reach Claude until you have changed some lines of code yourself. | `UserPromptSubmit` hook |
-| Hint ladder | `/mentor:hint` climbs direction → concept → API → sketch, one level per call. The level lives in a state file and goes into context with every prompt. | hook + state file |
+| Kinds of work | `/mentor:mode practice` (you solve it), `guided` (Claude leads in small steps), `debug` (hypothesis → experiment → analysis; the gate opens with a hypothesis), `read` (understanding existing code, no gate), `normal <reason>` (mentor off until you switch back, logged like a pause). | hook + style |
+| Hint ladder | `/mentor:hint` climbs direction → concept → API → sketch, one level per call; `/mentor:hint 3` sets a level, `/mentor:hint reset` starts over. Levels are cumulative. The level lives in a state file and goes into context with every prompt. | hook + state file |
 | Exit with a cost | `/mentor:off <reason>` lifts the blocks in this project for 30 min. No reason, no pause; from the third pause of a day the reason has to be longer. Every pause is logged. | hook |
 | Review with your diff | `/mentor:done` hands Claude the files you changed during the task, new files with their content, so the senior-style review comes in the first answer. | hook |
 | Code in chat | A large block of new code in Claude's answer while mentor mode is on is logged (a hook cannot take back text already shown). Diffs, logs, terminal blocks and lines already in the repo do not count. | `Stop` hook |
-| Weekly review | `/mentor:review-week` sums up the log: tasks done alone, work time, hint levels, gate stops, pauses and escapes, then quizzes you on topics that are due (Leitner boxes in the journal). | events log + journal |
+| Weekly review | `/mentor:review-week` sums up the log and, apart from activity, outcome measures: false blocks, stops followed by a pause, delayed recall from earlier quizzes, transfer exercises solved alone. Then it quizzes you on topics that are due (Leitner boxes) and follows up the transfer exercises. | events log + journal |
+| Transfer | `/mentor:done` ends with a transfer question and one small analogous exercise to solve alone in a few days; the weekly review asks how it went. | skill + journal |
+| Topic profile | Session start reads the journal's boxes: topics you know well, topics still weak. Claude takes smaller steps on the weak ones and steps in less on the known ones. You can correct it in the journal. | journal |
 | What's new | `/mentor:whats-new` compares the versions in your manifests with the latest releases and turns the changes into exercises on your own code. | skill |
 
 ## Install
@@ -55,7 +58,10 @@ framework, a domain you want to own); routine work you already know goes in norm
 | Command | |
 | --- | --- |
 | `/mentor:task <title>` | Start a task: hint level 0, snapshot of the repo state |
-| `/mentor:hint [where I'm stuck]` | Next hint level |
+| `/mentor:hint [1-4 \| reset] [where I'm stuck]` | Next hint level, a given level, or back to 0 |
+| `/mentor:mode <practice\|guided\|debug\|read\|normal <reason>>` | The kind of work in this repo (default from `default_mode`) |
+| `/mentor:wrong [why]` | The last gate stop was not a request for code: logged as a false block, your next prompt goes through |
+| `/mentor:forget <all\|days\|text>` | Remove the events log, events older than N days, or only the text in them |
 | `/mentor:try <what I checked / suspect>` | Describe your own attempt or hypothesis; counts as an attempt for the gate without editing files (debugging, reading unfamiliar code, a one-line fix) |
 | `/mentor:done [what I learned]` | Close the task, get a senior-style review, write the journal |
 | `/mentor:off <reason>` | Pause for `off_minutes` (default 30) in this project |
@@ -126,6 +132,34 @@ adds an hour, not the night.
 due; a correct answer moves the item up a box (3, 7, 14, 30 days), a wrong one sends it back to
 box 1, and a correct answer from box 5 ticks it off. Session start mentions it when items are due.
 
+### What is measured
+
+Fewer hints is not the goal: a well-used hint can teach more than struggling alone. So besides
+activity (tasks, hints, stops, pauses), the weekly review reports outcome measures:
+
+| Measure | Source |
+| --- | --- |
+| False blocks | `/mentor:wrong` after a gate stop, as a share of all stops |
+| Stops worked around | a gate stop followed by a pause in the same repo within 5 minutes |
+| Work time and hint depth | median work minutes and mean highest hint level of closed tasks (own work only) |
+| Work from pauses | tasks closed with code that appeared during a pause, counted apart |
+| Delayed recall | the `score:` lines of earlier quizzes in the journal |
+| Transfer | transfer exercises solved alone, with hints, not solved, skipped |
+
+### Model behaviour (evals)
+
+The hook tests check the hooks; whether Claude itself keeps to the rules is checked by an eval
+suite in `plugins/mentor/evals/`, run with `claude plugin eval` against a no-plugin baseline:
+the gate stops an order, Claude does not hand over the implementation when asked how to write
+it, edits are blocked, hint 1 names no API, hint 4 leaves `TODO`s, the review finds the user's
+off-by-one bug without rewriting the function, and a debugging question gets the method, not the
+fix. Each case sets up a small git repo with `fixture.sh`.
+
+```
+npm run eval        # all cases, with the no-plugin baseline; needs a logged-in Claude Code
+npm run eval:free   # the case that needs no model call (also run in CI)
+```
+
 ## Configuration
 
 Asked when you enable the plugin, editable in `/config`:
@@ -134,6 +168,8 @@ Asked when you enable the plugin, editable in `/config`:
 | --- | --- | --- |
 | `language` | from the system locale | Language of the hook messages (`pl` or `en`). Claude answers in the language you write in. |
 | `activation` | `always` | `always`, or `marker`: only in repos with `.mentor` or `/mentor:enable` |
+| `default_mode` | `practice` | The kind of work in a repo until `/mentor:mode` changes it: `practice`, `guided`, `debug` or `read` |
+| `log_text` | `false` | Keep your text (prompts, commands, hypotheses) in the events log. Off: only lengths |
 | `off_minutes` | `30` | Length of `/mentor:off` |
 | `attempt_min_lines` | `3` | Changed lines of code that count as an attempt |
 | `attempt_ignore` | empty | Extra globs that do not count, e.g. `src/generated/, *.snap` |
@@ -151,11 +187,15 @@ Everything stays on your machine, in `~/.claude/plugins/data/mentor-…/`:
 - `state/<project id>.json`: pause, open task, session starting points; one file per repository,
   so parallel sessions in different repos never overwrite each other, and a short lock file
   serialises sessions in the same repo
-- `events.jsonl`: the log (task start/end with work time, hints, `/mentor:try` texts, gate stops
-  with the first 120 characters of the prompt, blocked edits and tampering, code in chat, pauses
-  with reasons, files with lasting instructions for Claude (`CLAUDE.md`, agents, skills, commands,
-  output styles) written during a pause, what's-new checks). Each event carries the repo's folder name and a short id, so
-  two repos called `app` stay apart. Events older than `keep_days` are removed once a day.
+- `events.jsonl`: the log (task start/end with work time and mode, hints, `/mentor:try`, gate
+  stops, false blocks, blocked edits and tampering, code in chat, pauses with reasons, files with
+  lasting instructions for Claude (`CLAUDE.md`, agents, skills, commands, output styles) written
+  during a pause, what's-new checks). **Your text is not kept by default**: of a prompt, a
+  command or a hypothesis only the length is logged, and a task opened by `/mentor:hint` or
+  `/mentor:try` stays untitled, so no code or confidential prompt ends up in the log. Turn
+  `log_text` on to keep the first 120–200 characters. Each event carries a schema version
+  (`v`), the repo's folder name and a short id, so two repos called `app` stay apart. Events
+  older than `keep_days` are removed once a day; `/mentor:forget` removes them on request.
 - `LEARNING.md`: the learning journal written by `/mentor:done`, the quiz and `whats-new`. Never pruned.
 
 Uninstalling the plugin deletes this directory unless you pass `--keep-data`. Upgrading from 0.2
@@ -201,12 +241,14 @@ from the conversation and goes one level up, or takes the level you give (`/ment
 
 ## Development
 
-CI runs the hook tests on Linux, macOS and Windows with Node 20 and 22, and
-`claude plugin validate --strict` on both manifests with a pinned Claude Code version.
+CI runs the hook tests on Linux, macOS and Windows with Node 20 and 22, then, with a pinned
+Claude Code version, `claude plugin validate --strict` on both manifests and the eval case that
+needs no model call. The model cases need credentials and run locally.
 
 ```
 npm test
 npm run validate
+npm run eval
 ```
 
 ## License

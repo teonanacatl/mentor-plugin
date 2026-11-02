@@ -28,16 +28,24 @@ try {
   const lines = [lib.statusLine(cfg, proj, state)];
   if (enabled) {
     lines.push(
-      '[mentor] Commands the user can type: /mentor:task <title>, /mentor:hint [where I am stuck], ' +
-        '/mentor:try <my attempt or hypothesis>, /mentor:done [what I learned], /mentor:off <reason>, /mentor:on, ' +
-        '/mentor:status, /mentor:review-week, /mentor:whats-new' +
-        (cfg.activation === 'marker' ? ', /mentor:disable.' : '.'),
+      '[mentor] Commands the user can type: /mentor:task <title>, /mentor:hint [1-4|reset] [where I am stuck], ' +
+        '/mentor:try <my attempt or hypothesis>, /mentor:done [what I learned], /mentor:mode <practice|guided|debug|read|normal>, ' +
+        '/mentor:off <reason>, /mentor:on, /mentor:wrong (a false block), /mentor:status, /mentor:review-week, ' +
+        '/mentor:whats-new, /mentor:forget' + (cfg.activation === 'marker' ? ', /mentor:disable.' : '.'),
       `[mentor] Hint ladder: 1 direction, 2 concept, 3 API, 4 sketch. Each /mentor:hint raises the level by one.`);
     if (cfg.focusTopics) lines.push(`[mentor] Focus topics set by the user: ${cfg.focusTopics}.`);
+    // The explicit topic profile from the Leitner boxes: smaller steps where the user is weak.
+    const profile = lib.topicProfile();
+    if (profile.strong.length || profile.weak.length) {
+      lines.push(`[mentor] From the learning journal: the user already knows ${profile.strong.join(', ') || '(nothing recorded yet)'}; ` +
+        `still weak: ${profile.weak.join(', ') || '(nothing recorded)'}. On weak topics take smaller steps and explain more; ` +
+        'on known ones step in less. The user can correct this profile in the journal.');
+    }
     const due = lib.dueRepeats();
-    if (due) {
-      lines.push(`[mentor] ${due} repetition topic(s) in the learning journal are due. If it fits the conversation, ` +
-        'mention /mentor:review-week once, in one short sentence.');
+    const transfers = lib.journalStats(Date.now()).transfers.due;
+    if (due || transfers) {
+      lines.push(`[mentor] Due in the learning journal: ${due} repetition topic(s), ${transfers} transfer exercise(s). ` +
+        'If it fits the conversation, mention /mentor:review-week once, in one short sentence.');
     }
   } else {
     lines.push('[mentor] The user can turn mentor mode on here with /mentor:enable.');

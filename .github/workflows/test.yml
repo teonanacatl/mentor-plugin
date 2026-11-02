@@ -29,3 +29,6 @@ jobs:
           node-version: 22
       - run: npm install -g @anthropic-ai/claude-code@2.1.288  # pinned: bump on purpose, not by surprise
       - run: npm run validate
+      # The one eval case that needs no model call: the hook stops the prompt before Claude sees it.
+      # The others call a model and run locally (npm run eval), not here.
+      - run: npm run eval:free

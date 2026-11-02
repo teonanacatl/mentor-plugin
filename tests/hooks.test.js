@@ -194,8 +194,13 @@ test('hint without a task opens an implicit one', () => {
   const s = setup();
   s.prompt('/mentor:hint routing');
   const task = s.state().task;
-  assert.strictEqual(task.title, 'routing');
+  assert.strictEqual(task.title, '(untitled)', 'with log_text off the stuck description is not a title');
   assert.strictEqual(task.hint, 1);
+
+  const t = setup();
+  t.env.CLAUDE_PLUGIN_OPTION_LOG_TEXT = 'true';
+  t.prompt('/mentor:hint routing');
+  assert.strictEqual(t.state().task.title, 'routing');
 });
 
 test('implicit task counts the work of this session, not work from before it', () => {
@@ -538,7 +543,7 @@ test('whats-new is logged and gets the journal path', () => {
   const r = s.prompt('/mentor:whats-new angular');
   assert.match(ctx(r), /not created yet/);
   assert.match(ctx(r), /Angular signals/);
-  assert.ok(s.events().some((e) => e.type === 'whats_new' && e.arg === 'angular'));
+  assert.ok(s.events().some((e) => e.type === 'whats_new' && e.argChars === 7 && !('arg' in e)), 'only the length by default');
   assert.match(ctx(s.prompt('/mentor:review-week')), /what's-new checks: 1/);
 });
 
@@ -601,7 +606,7 @@ test('due repetition items are counted at session start and in the review', () =
     '- repeat: change detection',
     '- [x] repeat: closures (mastered 2026-01-01)',
   ].join('\n'));
-  assert.match(ctx(s.start()), /2 repetition topic\(s\) in the learning journal are due/);
+  assert.match(ctx(s.start()), /Due in the learning journal: 2 repetition topic\(s\), 0 transfer exercise\(s\)/);
   assert.match(ctx(s.prompt('/mentor:review-week')), /Repetition items due today or earlier: 2/);
 });
 
@@ -882,4 +887,129 @@ test("a project's .claude/ is team work: free in a pause, logged; settings and t
     assert.strictEqual(s.decision('Bash', { command: cmd }), 'deny', `should deny: ${cmd}`);
   }
   assert.strictEqual(s.events().filter((e) => e.type === 'persist_write').length, 2, 'mkdir and git add of .claude/commands');
+});
+
+// --- 0.6.0 ---
+
+test('the log keeps no user text by default; log_text keeps it; /mentor:forget cleans up', () => {
+  const s = setup();
+  s.prompt('napisz mi parser dla tajnego protokołu XYZ');
+  s.prompt('/mentor:try podejrzewam, że pole długości ramki jest big-endian');
+  let events = s.events();
+  const block = events.find((e) => e.type === 'gate_block');
+  assert.ok(!('prompt' in block) && block.promptChars > 20, 'only the length of the prompt');
+  assert.ok(!('text' in events.find((e) => e.type === 'try')));
+  assert.ok(events.every((e) => e.v === 2), 'events carry the schema version');
+  assert.doesNotMatch(fs.readFileSync(path.join(s.data, 'events.jsonl'), 'utf8'), /XYZ|big-endian/);
+
+  s.env.CLAUDE_PLUGIN_OPTION_LOG_TEXT = 'true';
+  s.prompt('/mentor:try druga hipoteza: suma kontrolna liczona od złego offsetu');
+  assert.match(s.events().filter((e) => e.type === 'try').pop().text, /suma kontrolna/);
+
+  assert.match(s.prompt('/mentor:forget text').json.systemMessage, /usunięto treść z 1 zdarzeń/);
+  assert.doesNotMatch(fs.readFileSync(path.join(s.data, 'events.jsonl'), 'utf8'), /suma kontrolna/);
+  assert.match(s.prompt('/mentor:forget all').json.systemMessage, /usunięto \d+ zdarzeń/);
+  events = fs.readFileSync(path.join(s.data, 'events.jsonl'), 'utf8').trim().split('\n').filter(Boolean);
+  assert.ok(events.length <= 1, 'only what came after the forget');
+  assert.match(s.prompt('/mentor:forget cokolwiek').json.systemMessage, /forget all/);
+});
+
+test('modes: read has no gate, debug opens only with a hypothesis, normal is a pause without an end', () => {
+  const s = setup();
+  assert.match(ctx(s.prompt('co dalej?')), /mode practice:/);
+  s.prompt('/mentor:mode read');
+  assert.match(ctx(s.prompt('co dalej?')), /mode read: understanding existing code/);
+  assert.strictEqual(s.prompt('napisz to').code, 0, 'read mode has no gate');
+  assert.strictEqual(s.decision('Edit', { file_path: path.join(s.repo, 'app.js') }), 'deny', 'but edits stay blocked');
+
+  s.prompt('/mentor:mode debug');
+  s.prompt('/mentor:task strumień gubi zdarzenia');
+  s.append('app.js', lines(5, 'console.log probe'));
+  const blocked = s.prompt('napraw to');
+  assert.strictEqual(blocked.code, 2, 'in debug mode lines alone do not open the gate');
+  assert.match(blocked.stderr, /hipoteza/);
+  s.prompt('/mentor:try podejrzewam, że subskrypcja jest zakładana dwa razy');
+  assert.strictEqual(s.prompt('napraw to').code, 0);
+  assert.strictEqual(s.state().task.mode, 'debug');
+
+  assert.strictEqual(s.prompt('/mentor:mode normal').code, 2, 'normal needs a reason');
+  assert.match(s.prompt('/mentor:mode normal rutynowa migracja konfiguracji').json.systemMessage, /bez limitu czasu/);
+  assert.match(ctx(s.prompt('co dalej?')), /PAUSED in this project until the user switches back/);
+  assert.strictEqual(s.tool('Edit', { file_path: path.join(s.repo, 'app.js') }).stdout, '');
+  s.append('migration.js', lines(8, 'normal mode work'));
+  s.prompt('/mentor:mode practice');
+  assert.match(ctx(s.prompt('co dalej?')), /ACTIVE.*mode practice/);
+  assert.strictEqual(s.state().task.pausedWork, 8, 'work in normal mode is recorded like work in a pause');
+  assert.strictEqual(s.prompt('/mentor:mode coś').json.systemMessage.includes('practice, guided, debug, read'), true);
+
+  s.prompt('/mentor:done');
+  assert.match(ctx(s.prompt('/mentor:review-week')), /tasks closed by mode: practice 1/);
+});
+
+test('default_mode sets the kind of work for new repos', () => {
+  const s = setup();
+  s.env.CLAUDE_PLUGIN_OPTION_DEFAULT_MODE = 'guided';
+  assert.match(ctx(s.prompt('co dalej?')), /mode guided: lead step by step/);
+});
+
+test('the hint ladder can be set and reset', () => {
+  const s = setup();
+  s.prompt('/mentor:task parser');
+  const set = s.prompt('/mentor:hint 3 nie wiem, jakiego API użyć');
+  assert.match(set.json.systemMessage, /Podpowiedź ustawiona na 3\/4 · API/);
+  assert.match(ctx(set), /level is now 3\/4 \(set by the user, was 0\/4\).*cumulative/);
+  assert.ok(s.events().some((e) => e.type === 'hint' && e.level === 3 && e.jump));
+  assert.match(s.prompt('/mentor:hint reset').json.systemMessage, /Drabina od zera/);
+  assert.strictEqual(s.state().task.hint, 0);
+  s.prompt('/mentor:hint');
+  assert.strictEqual(s.state().task.hint, 1);
+  assert.strictEqual(s.state().task.title, 'parser');
+});
+
+test('/mentor:wrong logs a false block and lets the next prompt through once', () => {
+  const s = setup();
+  assert.match(s.prompt('/mentor:wrong').json.systemMessage, /nie było ostatnio blokady/);
+  const blocked = s.prompt('zrób to za mnie, a potem wyjaśnij każdy krok');
+  assert.strictEqual(blocked.code, 2);
+  assert.match(blocked.stderr, /\/mentor:wrong/);
+  assert.match(s.prompt('/mentor:wrong chciałem tylko wyjaśnienia').json.systemMessage, /fałszywa blokada/);
+  assert.strictEqual(s.prompt('zrób to za mnie, a potem wyjaśnij każdy krok').code, 0, 'one pass');
+  assert.strictEqual(s.prompt('zrób to za mnie').code, 2, 'only once');
+  const review = ctx(s.prompt('/mentor:review-week'));
+  assert.match(review, /false blocks \(\/mentor:wrong\): 1 of 2 gate stops \(50%\)/);
+  assert.strictEqual(s.prompt('zrób mi review tego pliku').code, 0, '"zrób mi review" is not an order for code');
+});
+
+test('outcome measures: overridden stops, recall from quizzes, transfer results', () => {
+  const s = setup();
+  s.prompt('napisz to');
+  s.prompt('/mentor:off deadline za godzinę');
+  fs.writeFileSync(path.join(s.data, 'LEARNING.md'), [
+    `## Quiz ${new Date().getFullYear()}-01-01`, '- score: 1/4',
+    '## Quiz 2999-01-01', '- score: 9/9',
+    '- [x] transfer: walidacja maski (solved alone 2026-11-01)',
+    '- [x] transfer: parser nagłówka (with hints 2026-11-01)',
+    '- [x] transfer: kata z rekurencją (skipped: za łatwe)',
+    '- [ ] transfer: drugi parser (due 2000-01-01)',
+    '- [ ] transfer: trzeci parser (due 2999-01-01)',
+  ].join('\n'));
+  const review = ctx(s.prompt('/mentor:review-week 400'));
+  assert.match(review, /stops followed by a pause within 5 min: 1 \(100%\)/);
+  assert.match(review, /delayed recall \(quizzes in the journal\): .*1\/4/);
+  assert.match(review, /transfer exercises: 1 solved alone, 1 with hints, 0 not solved, 2 open \(1 due\)/);
+  assert.match(review, /Transfer exercises due: 1/);
+});
+
+test('session start passes the topic profile from the Leitner boxes', () => {
+  const s = setup();
+  fs.mkdirSync(s.data, { recursive: true });
+  fs.writeFileSync(path.join(s.data, 'LEARNING.md'), [
+    '- [ ] repeat: RxJS switchMap (box 1, due 2999-01-01)',
+    '- [ ] repeat: Angular signals (box 4, due 2999-01-01)',
+    '- [x] repeat: closures (mastered 2026-01-01)',
+    '- [ ] transfer: parser (due 2000-01-01)',
+  ].join('\n'));
+  const text = ctx(s.start());
+  assert.match(text, /already knows Angular signals, closures; still weak: RxJS switchMap/);
+  assert.match(text, /0 repetition topic\(s\), 1 transfer exercise\(s\)/);
 });

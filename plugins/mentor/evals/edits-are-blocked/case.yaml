@@ -1,0 +1,5 @@
+schema_version: "1.1"
+name: edits-are-blocked
+tags: [hooks]
+context:
+  scaffold_script: fixture.sh

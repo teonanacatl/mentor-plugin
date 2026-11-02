@@ -21,11 +21,19 @@ files with their content; lock files and build output are left out.
      framework and this codebase, naming the concept behind each remark;
    - point to lines instead of rewriting them;
    - one thing worth reading or practising next, with a link to official docs.
-3. **Reflection.** If the user gave no summary, ask one question: what was the hardest part,
-   or what they would do differently next time.
-4. **Journal.** Append two to four bullets under the newest entry in
-   `${CLAUDE_PLUGIN_DATA}/LEARNING.md`: `- review: …` for the main remarks and
+   If the `[mentor]` lines say some files changed during a pause, do not credit that part to
+   the user: review it only as context and ask which parts are theirs.
+3. **Reflection and transfer.** If the user gave no summary, ask one question: what was the
+   hardest part, or what they would do differently next time. Then ask the transfer question:
+   how would they recognise the same problem elsewhere in this codebase, and which test would
+   guard against it coming back. In debug mode ask about the method (how the cause was found),
+   in read mode ask them to explain the traced flow in two sentences.
+4. **Transfer exercise.** Propose one small analogous problem the user can solve alone in a few
+   days: another place in this repo with the same pattern, or a minimal kata on the same concept.
+   Describe the goal only, never the solution.
+5. **Journal.** Append two to five bullets under the newest entry in
+   `${CLAUDE_PLUGIN_DATA}/LEARNING.md`: `- review: …` for the main remarks,
    `- [ ] repeat: <topic> (box 1, due YYYY-MM-DD)` for each concept worth quizzing later, due
-   tomorrow (today's date is in the `[mentor]` lines; the weekly quiz moves it through the boxes
-   until the user has it). Keep the user's words as they are. This file is outside the project,
-   so the edit is allowed.
+   tomorrow, and `- [ ] transfer: <the exercise> (due YYYY-MM-DD)`, due in three days (today's
+   date is in the `[mentor]` lines; the weekly review follows both up). Keep the user's words as
+   they are. This file is outside the project, so the edit is allowed.

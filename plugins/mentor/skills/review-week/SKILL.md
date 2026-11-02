@@ -20,8 +20,13 @@ In the user's language, short and factual, no praise inflation and no guilt:
   mode was disabled, blocked attempts to change mentor's state, files with lasting instructions
   written during pauses. Report them as facts; at hint level 4 a sketch is expected, so say which
   ones went beyond it;
+- the outcome measures, which matter more than the activity counts: false blocks and stops
+  followed by a pause (friction the gate caused), delayed recall from earlier quizzes, transfer
+  exercises solved alone. Fewer hints is not the goal in itself; a well-used hint can teach more
+  than struggling alone. Say what the measures suggest, and when there is too little data, say so;
 - one pattern worth noticing and one concrete suggestion for next week. If routine work keeps
-  triggering pauses, say that mentor mode may not fit those tasks; that is a valid outcome.
+  triggering pauses, say that mentor mode may not fit those tasks; that is a valid outcome. If
+  false blocks keep coming, suggest a `gate_regex` or `/mentor:mode read` for that kind of work.
 
 ## 2. Quiz
 
@@ -43,7 +48,14 @@ An open item looks like `- [ ] repeat: <topic> (box N, due YYYY-MM-DD)`. Today's
 If nothing is due, say when the next item is due and quiz from the focus topics instead; if the
 journal has no items at all, say that it fills up through `/mentor:done` and `/mentor:whats-new`.
 
-## 3. Record
+## 3. Transfer
+
+After the quiz, go through the open `- [ ] transfer:` items that are due. For each, ask whether
+the user tried it and how it went: solved alone, solved with hints, or not solved yet. If they
+solved it, ask for one sentence on how, and check it makes sense. The user may also say an
+exercise was too easy or not relevant; then close it as `(skipped: <why>)`.
+
+## 4. Record
 
 In `${CLAUDE_PLUGIN_DATA}/LEARNING.md`, rewrite each quizzed line in place:
 
@@ -52,6 +64,9 @@ In `${CLAUDE_PLUGIN_DATA}/LEARNING.md`, rewrite each quizzed line in place:
   `- [x] repeat: <topic> (mastered YYYY-MM-DD)`.
 - **Partly correct or wrong:** back to box 1, due tomorrow.
 - Lines without box and date get them now, in the same format.
+- Transfer items: `- [x] transfer: <exercise> (solved alone YYYY-MM-DD)`, `(with hints YYYY-MM-DD)`,
+  `(not solved YYYY-MM-DD)` or `(skipped: <why>)`; one not tried yet stays open with a due date
+  three days ahead.
 - Append:
 
 ```
@@ -59,3 +74,6 @@ In `${CLAUDE_PLUGIN_DATA}/LEARNING.md`, rewrite each quizzed line in place:
 - score: N/M
 - weak: <topics still open>
 ```
+
+The `score:` line and the transfer results are read by the hook for the outcome measures of
+later reviews, so keep them in exactly this format.
