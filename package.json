@@ -1,0 +1,10 @@
+{
+  "name": "mentor-plugin",
+  "private": true,
+  "description": "Development scripts for the mentor Claude Code plugin. The plugin itself has no dependencies.",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test",
+    "validate": "claude plugin validate --strict ./plugins/mentor && claude plugin validate --strict ."
+  }
+}

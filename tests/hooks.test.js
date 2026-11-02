@@ -12,11 +12,13 @@ const { spawnSync, execFileSync } = require('child_process');
 
 const SCRIPTS = path.join(__dirname, '..', 'plugins', 'mentor', 'scripts');
 const { looksLikeWrite } = require(path.join(SCRIPTS, 'pre-tool.js'));
+const { codeLines } = require(path.join(SCRIPTS, 'chat-check.js'));
 
 const commit = (repo, msg) => {
   execFileSync('git', ['add', '-A'], { cwd: repo });
   execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', msg], { cwd: repo });
 };
+const lines = (n, tag = 'line') => Array.from({ length: n }, (_, i) => `// ${tag} ${i}`).join('\n') + '\n';
 
 function setup({ git = true, root: shared } = {}) {
   const root = shared || fs.mkdtempSync(path.join(os.tmpdir(), 'mentor-test-'));
@@ -36,30 +38,54 @@ function setup({ git = true, root: shared } = {}) {
     CLAUDE_CONFIG_DIR: config,
     CLAUDE_PLUGIN_OPTION_LANGUAGE: 'pl',
     CLAUDE_PLUGIN_OPTION_OFF_MINUTES: '30',
+    LC_ALL: '',
+    LC_MESSAGES: '',
   };
-  const run = (script, input) => {
+  const s = { root, repo, data, config, env, session: 'sess-1' };
+  s.run = (script, input) => {
     const r = spawnSync('node', [path.join(SCRIPTS, script)], {
-      input: JSON.stringify({ cwd: repo, ...input }), env, encoding: 'utf8',
+      input: JSON.stringify({ cwd: repo, session_id: s.session, ...input }), env, encoding: 'utf8',
     });
     let json = null;
     try { json = r.stdout ? JSON.parse(r.stdout) : null; } catch { /* plain output */ }
     return { code: r.status, stdout: r.stdout, stderr: r.stderr, json };
   };
-  const prompt = (text) => run('prompt.js', { hook_event_name: 'UserPromptSubmit', prompt: text });
-  const tool = (tool_name, tool_input) => run('pre-tool.js', { hook_event_name: 'PreToolUse', tool_name, tool_input });
-  const state = () => JSON.parse(fs.readFileSync(path.join(data, 'state.json'), 'utf8'));
-  const events = () => fs.readFileSync(path.join(data, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
-  return { root, repo, data, config, env, run, prompt, tool, state, events };
+  s.start = () => s.run('session-start.js', { hook_event_name: 'SessionStart', source: 'startup' });
+  s.prompt = (text) => s.run('prompt.js', { hook_event_name: 'UserPromptSubmit', prompt: text });
+  s.tool = (tool_name, tool_input) => s.run('pre-tool.js', { hook_event_name: 'PreToolUse', tool_name, tool_input });
+  s.stop = (extra) => s.run('chat-check.js', { hook_event_name: 'Stop', ...extra });
+  s.decision = (tool_name, tool_input) => {
+    const r = s.tool(tool_name, tool_input);
+    return r.json ? r.json.hookSpecificOutput.permissionDecision : 'none';
+  };
+  // The state file of this repo (one file per project, named by a hash of the repo root).
+  s.stateFile = () => {
+    const dir = path.join(data, 'state');
+    const name = path.basename(repo).toLowerCase();
+    for (const f of fs.existsSync(dir) ? fs.readdirSync(dir) : []) {
+      const st = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
+      if (st.key.toLowerCase().endsWith(name)) return path.join(dir, f);
+    }
+    return null;
+  };
+  s.state = () => JSON.parse(fs.readFileSync(s.stateFile(), 'utf8'));
+  s.writeState = (st) => fs.writeFileSync(s.stateFile(), JSON.stringify(st));
+  s.events = () => fs.readFileSync(path.join(data, 'events.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  s.append = (file, text) => fs.appendFileSync(path.join(repo, file), text);
+  return s;
 }
 
 const ctx = (r) => r.json && r.json.hookSpecificOutput && r.json.hookSpecificOutput.additionalContext;
 
-test('session start reports active mode and commands', () => {
+test('session start reports active mode, commands and the journal path', () => {
   const s = setup();
-  const r = s.run('session-start.js', { hook_event_name: 'SessionStart', source: 'startup' });
+  const r = s.start();
   assert.strictEqual(r.code, 0);
   assert.match(ctx(r), /\[mentor\] ACTIVE/);
   assert.match(ctx(r), /\/mentor:hint/);
+  assert.match(ctx(r), /\/mentor:try/);
+  assert.match(ctx(r), /Learning journal: .*LEARNING\.md \(not created yet\)/);
+  assert.ok(s.state().sessions['sess-1'].baseline, 'the session baseline is taken at start');
 });
 
 test('gate blocks a request for code in a clean repo, lets questions through', () => {
@@ -67,29 +93,76 @@ test('gate blocks a request for code in a clean repo, lets questions through', (
   const blocked = s.prompt('Napisz mi funkcję walidującą adres IP');
   assert.strictEqual(blocked.code, 2);
   assert.match(blocked.stderr, /najpierw Twoja próba/);
-  assert.match(blocked.stderr, /nie ma żadnych zmian/);
+  assert.match(blocked.stderr, /Od początku tej sesji w kodzie zmieniło się 0 z wymaganych 3 linii/);
 
   const question = s.prompt('Jak działa change detection w Angularze?');
   assert.strictEqual(question.code, 0);
   assert.match(ctx(question), /ACTIVE · no task started/);
-
-  assert.strictEqual(s.prompt('jak to naprawić?').code, 0, 'infinitive is a question, not an order');
-  assert.ok(s.events().some((e) => e.type === 'gate_block'));
+  assert.ok(s.events().some((e) => e.type === 'gate_block' && e.lines === 0));
 });
 
-test('task snapshot: gate opens only after the user changes something', () => {
+test('the gate catches orders and lets information questions through', () => {
   const s = setup();
-  fs.writeFileSync(path.join(s.repo, 'unrelated.txt'), 'dirty before the task\n');
+  const pass = [
+    'How do I fix this?', 'What is the best way to fix it?', 'popraw mnie, jeśli się mylę',
+    'Can you show me the code path that handles auth?', 'Should I write a test for this?',
+    'Myślę, że napiszę tu serwis i dopiszę walidację — czy to dobry kierunek?', 'Sam to przepiszę, tylko powiedz gdzie leży interfejs',
+    'Poprawię to jutro', 'jak to naprawić?', 'Czy powinienem dopisać test?', 'A gdzie dodać ten import?',
+  ];
+  const block = [
+    'stwórz komponent logowania', 'dokończ tę funkcję', 'rozwiąż to', 'create the function for me', 'refactor this module',
+    'add the missing method', 'solve it', 'can you code this up?', 'napisz to', 'NAPISZ walidację', 'Popraw mi to',
+    'pokaż mi rozwiązanie', 'pokaz mi gotowy kod', 'zrób to za mnie', 'Czy możesz napisać ten serwis?',
+    'write me the code for it', 'Ok, napisz to.', 'Rozumiem problem. Teraz zaimplementuj resztę.', '/ napisz to',
+  ];
+  for (const p of pass) assert.strictEqual(s.prompt(p).code, 0, `should pass: ${p}`);
+  for (const p of block) assert.strictEqual(s.prompt(p).code, 2, `should block: ${p}`);
+  assert.strictEqual(s.prompt('/review napisz mi to').code, 0, 'a real slash command is not gated');
+});
+
+test('task snapshot: earlier changes and a one-line touch are not an attempt', () => {
+  const s = setup();
+  s.append('unrelated.js', lines(10, 'dirty before the task'));
   const started = s.prompt('/mentor:task walidacja IP');
   assert.strictEqual(started.code, 0);
   assert.match(started.json.systemMessage, /Zadanie: walidacja IP/);
 
   const blocked = s.prompt('pokaż mi rozwiązanie');
   assert.strictEqual(blocked.code, 2, 'pre-existing dirt does not count as an attempt');
-  assert.match(blocked.stderr, /walidacja IP/);
+  assert.match(blocked.stderr, /„walidacja IP” w kodzie zmieniło się 0 z wymaganych 3/);
 
-  fs.appendFileSync(path.join(s.repo, 'app.js'), 'function isIp(s) { /* try */ }\n');
+  s.append('app.js', 'function isIp(s) {}\n');
+  assert.strictEqual(s.prompt('pokaż mi rozwiązanie').code, 2, 'one line is below attempt_min_lines');
+  s.append('app.js', '  // split into octets\n  // check the range\n');
   assert.strictEqual(s.prompt('pokaż mi rozwiązanie').code, 0);
+});
+
+test('attempt_min_lines is configurable', () => {
+  const s = setup();
+  s.env.CLAUDE_PLUGIN_OPTION_ATTEMPT_MIN_LINES = '1';
+  s.prompt('/mentor:task jedna linia');
+  s.append('app.js', 'fix();\n');
+  assert.strictEqual(s.prompt('napraw resztę').code, 0);
+});
+
+test('generated files, lock files and build output do not open the gate', () => {
+  const s = setup();
+  s.prompt('/mentor:task artefakty');
+  fs.mkdirSync(path.join(s.repo, 'coverage'));
+  fs.writeFileSync(path.join(s.repo, 'coverage', 'coverage.json'), lines(50));
+  fs.mkdirSync(path.join(s.repo, 'dist', 'js'), { recursive: true });
+  fs.writeFileSync(path.join(s.repo, 'dist', 'js', 'main.js'), lines(50));
+  fs.writeFileSync(path.join(s.repo, 'package-lock.json'), lines(50));
+  fs.writeFileSync(path.join(s.repo, 'test.log'), lines(50));
+  assert.strictEqual(s.prompt('napisz to').code, 2);
+
+  s.env.CLAUDE_PLUGIN_OPTION_ATTEMPT_IGNORE = 'src/generated/';
+  fs.mkdirSync(path.join(s.repo, 'src', 'generated'), { recursive: true });
+  fs.writeFileSync(path.join(s.repo, 'src', 'generated', 'api.ts'), lines(50));
+  assert.strictEqual(s.prompt('napisz to').code, 2, 'attempt_ignore adds own patterns');
+
+  fs.writeFileSync(path.join(s.repo, 'parser.js'), lines(5));
+  assert.strictEqual(s.prompt('napisz to').code, 0);
 });
 
 test('task without a title and off without a reason are refused', () => {
@@ -106,7 +179,8 @@ test('hint ladder climbs one level per call and stops at 4', () => {
   const levels = [];
   for (let i = 0; i < 5; i++) {
     const r = s.prompt('/mentor:hint utknąłem');
-    levels.push(s.state().tasks[Object.keys(s.state().tasks)[0]].hint);
+    levels.push(s.state().task.hint);
+    if (i === 0) assert.match(r.json.systemMessage, /Podpowiedź 1\/4 · kierunek/);
     if (i === 1) assert.match(ctx(r), /level is now 2\/4.*concept/);
     if (i === 4) assert.match(ctx(r), /already at its top/);
   }
@@ -117,43 +191,115 @@ test('hint ladder climbs one level per call and stops at 4', () => {
 test('hint without a task opens an implicit one', () => {
   const s = setup();
   s.prompt('/mentor:hint routing');
-  const task = Object.values(s.state().tasks)[0];
+  const task = s.state().task;
   assert.strictEqual(task.title, 'routing');
   assert.strictEqual(task.hint, 1);
 });
 
-test('edits in the project are denied, Claude config dir and plugin data stay writable', () => {
+test('implicit task counts the work of this session, not work from before it', () => {
   const s = setup();
-  const denied = s.tool('Edit', { file_path: path.join(s.repo, 'app.js'), old_string: 'a', new_string: 'b' });
-  assert.strictEqual(denied.json.hookSpecificOutput.permissionDecision, 'deny');
-  assert.strictEqual(s.tool('Write', { file_path: 'relative/new.ts', content: 'x' }).json.hookSpecificOutput.permissionDecision, 'deny');
-  assert.strictEqual(s.tool('NotebookEdit', { notebook_path: path.join(s.repo, 'n.ipynb') }).json.hookSpecificOutput.permissionDecision, 'deny');
+  s.append('app.js', lines(10, 'left from yesterday'));
+  s.start();
+  s.prompt('/mentor:hint utknąłem na parserze');
+  assert.strictEqual(s.prompt('pokaż mi rozwiązanie').code, 2, 'changes from before the session do not count');
 
-  const plan = s.tool('Write', { file_path: path.join(s.config, 'plans', 'plan.md'), content: 'x' });
-  assert.strictEqual(plan.code, 0);
-  assert.strictEqual(plan.stdout, '');
-  const journal = s.tool('Edit', { file_path: path.join(s.data, 'LEARNING.md') });
-  assert.strictEqual(journal.stdout, '');
+  const w = setup();
+  w.start();
+  w.append('app.js', lines(4, 'my own start'));
+  w.prompt('/mentor:hint utknąłem na parserze');
+  assert.strictEqual(w.prompt('pokaż mi rozwiązanie').code, 0, 'work done in this session counts');
+});
 
+test('edits in the project are denied; plans, todos, memory and the journal stay writable', () => {
+  const s = setup();
+  assert.strictEqual(s.decision('Edit', { file_path: path.join(s.repo, 'app.js'), old_string: 'a', new_string: 'b' }), 'deny');
+  assert.strictEqual(s.decision('Write', { file_path: 'relative/new.ts', content: 'x' }), 'deny');
+  assert.strictEqual(s.decision('NotebookEdit', { notebook_path: path.join(s.repo, 'n.ipynb') }), 'deny');
+  assert.strictEqual(s.decision('Write', { file_path: path.join(os.tmpdir(), 'elsewhere.js') }), 'deny', 'outside the project is not a loophole');
+
+  for (const ok of [
+    path.join(s.config, 'plans', 'plan.md'),
+    path.join(s.config, 'todos', 'x.json'),
+    path.join(s.config, 'projects', 'my-proj', 'memory', 'MEMORY.md'),
+    path.join(s.data, 'LEARNING.md'),
+  ]) {
+    assert.strictEqual(s.tool('Write', { file_path: ok, content: 'x' }).stdout, '', `should allow: ${ok}`);
+  }
   assert.strictEqual(s.tool('Read', { file_path: path.join(s.repo, 'app.js') }).stdout, '');
   assert.ok(s.events().some((e) => e.type === 'edit_block' && e.file === 'app.js'));
 });
 
-test('shell commands that write files ask, read-only ones pass', () => {
+test("Claude cannot switch mentor off from the inside, not even during a pause", () => {
   const s = setup();
-  assert.strictEqual(s.tool('Bash', { command: "sed -i 's/a/b/' app.js" }).json.hookSpecificOutput.permissionDecision, 'ask');
+  s.prompt('/mentor:task x');
+  const protectedFiles = [
+    s.stateFile(),
+    path.join(s.data, 'events.jsonl'),
+    path.join(s.config, 'settings.json'),
+    path.join(s.config, 'settings.local.json'),
+    path.join(s.config, 'plugins', 'cache', 'mentor', 'scripts', 'pre-tool.js'),
+    path.join(s.repo, '.claude', 'settings.local.json'),
+  ];
+  for (const f of protectedFiles) assert.strictEqual(s.decision('Write', { file_path: f, content: '{}' }), 'deny', `should deny: ${f}`);
+  for (const cmd of ['claude plugin disable mentor@mentor-plugin', `echo {} > ${path.join(s.config, 'settings.json')}`,
+    "jq '.enabledPlugins = {}' ~/.claude/settings.json > /tmp/s && mv /tmp/s ~/.claude/settings.json", 'rm .mentor',
+    `node -e "require('fs').writeFileSync('${s.stateFile().replace(/\\/g, '/')}', '{}')"`]) {
+    assert.strictEqual(s.decision('Bash', { command: cmd }), 'deny', `should deny: ${cmd}`);
+  }
+  assert.strictEqual(s.tool('Bash', { command: 'cat ~/.claude/settings.json' }).stdout, '', 'reading settings is fine');
+
+  s.prompt('/mentor:off pilny hotfix na produkcji');
+  assert.strictEqual(s.tool('Edit', { file_path: path.join(s.repo, 'app.js') }).stdout, '', 'the pause lifts project blocks');
+  assert.strictEqual(s.decision('Write', { file_path: s.stateFile(), content: '{}' }), 'deny', 'but not the protection of the state');
+  assert.strictEqual(s.decision('Bash', { command: 'claude plugin uninstall mentor' }), 'deny');
+  assert.ok(s.events().filter((e) => e.type === 'tamper_block').length >= protectedFiles.length);
+});
+
+test('MCP tools: writes into the project are denied, other MCP tools pass', () => {
+  const s = setup();
+  assert.strictEqual(s.decision('mcp__filesystem__write_file', { path: path.join(s.repo, 'app.js'), content: 'x' }), 'deny');
+  assert.strictEqual(s.decision('mcp__filesystem__edit_file', { path: 'app.js', edits: [] }), 'deny', 'relative to the project');
+  assert.strictEqual(s.decision('mcp__fs__move_file', { source: path.join(s.config, 'plans', 'a.md'), destination: path.join(s.repo, 'b.js') }), 'deny');
+  assert.strictEqual(s.decision('mcp__filesystem__write_file', { path: path.join(s.config, 'settings.json') }), 'deny');
+  assert.strictEqual(s.tool('mcp__filesystem__read_file', { path: path.join(s.repo, 'app.js') }).stdout, '');
+  assert.strictEqual(s.tool('mcp__calendar__create_event', { title: 'standup', start: '10:00' }).stdout, '', 'no path, no file write');
+  assert.strictEqual(s.tool('mcp__filesystem__write_file', { path: path.join(s.config, 'plans', 'p.md') }).stdout, '');
+  assert.ok(s.events().some((e) => e.type === 'edit_block' && e.tool === 'mcp__filesystem__write_file'));
+});
+
+test('shell guard: ask by default, deny or off on request', () => {
+  const s = setup();
+  assert.strictEqual(s.decision('Bash', { command: "sed -i 's/a/b/' app.js" }), 'ask');
   assert.strictEqual(s.tool('Bash', { command: 'git diff HEAD' }).stdout, '');
+  s.env.CLAUDE_PLUGIN_OPTION_BASH_GUARD_DENY = 'true';
+  assert.strictEqual(s.decision('Bash', { command: "sed -i 's/a/b/' app.js" }), 'deny');
+  assert.ok(s.events().some((e) => e.type === 'shell_block'));
+  s.env.CLAUDE_PLUGIN_OPTION_BASH_GUARD = 'false';
+  assert.strictEqual(s.tool('Bash', { command: "sed -i 's/a/b/' app.js" }).stdout, '');
 });
 
 test('looksLikeWrite heuristics', () => {
-  for (const cmd of ['echo x > out.txt', 'cat a >> b', "sed -i 's/a/b/' f", 'perl -pi -e s/a/b/ f', 'cat x | tee y',
-    'git apply fix.patch', 'git checkout -- app.js', 'mv a b', 'Set-Content -Path a -Value b', 'npx prettier --write .',
-    'npx eslint --fix src', 'ng g c button', "node -e \"require('fs').writeFileSync('a','b')\""]) {
+  for (const cmd of ['echo x > out.txt', 'cat a >> b', 'echo x >| f', "sed -i 's/a/b/' f", 'perl -pi -e s/a/b/ f', 'cat x | tee y',
+    'git apply fix.patch', 'git checkout -- app.js', 'git checkout app.js', 'git switch main', 'git stash', 'git stash pop',
+    'git clean -fd', 'mv a b', 'ln -s a b', 'dd if=/dev/zero of=f bs=1k count=1', 'install -m 644 a /usr/local/bin/a',
+    'Set-Content -Path a -Value b', 'npx prettier --write .', 'npx eslint --fix src', 'ng g c button',
+    "node -e \"require('fs').writeFileSync('a','b')\""]) {
     assert.ok(looksLikeWrite(cmd), `should flag: ${cmd}`);
   }
   for (const cmd of ['git diff', 'npm test 2>&1', 'ls > /dev/null', 'ls 2>/dev/null', 'git log --oneline | head -5',
-    "node -e \"[1].map(x => x)\"", 'grep -rn "foo" src', 'npx ng test --watch=false', 'Get-Content app.js']) {
+    "node -e \"[1].map(x => x)\"", 'grep -rn "foo" src', 'npx ng test --watch=false', 'Get-Content app.js',
+    'grep -- "--fix" CHANGELOG.md', 'git stash list', 'npm install', 'git log --grep="--write"']) {
     assert.ok(!looksLikeWrite(cmd), `should pass: ${cmd}`);
+  }
+});
+
+test('quoted comparisons are not redirects', () => {
+  for (const cmd of ["jq '.items[] | select(.count > 0)' data.json", 'node -e "console.log(arr.length > 0)"',
+    "python -c 'print(1 > 0)'", 'git log --format="%h > %s"']) {
+    assert.ok(!looksLikeWrite(cmd), `should pass: ${cmd}`);
+  }
+  for (const cmd of ['echo "x > y" > out.txt', "jq '.a' in.json > out.json", 'node -e "x>0" >> log.txt']) {
+    assert.ok(looksLikeWrite(cmd), `should flag: ${cmd}`);
   }
 });
 
@@ -169,7 +315,7 @@ test('pause lifts blocks and the gate, /mentor:on brings them back', () => {
 
   const on = s.prompt('/mentor:on');
   assert.match(on.json.systemMessage, /znów aktywny/);
-  assert.strictEqual(s.tool('Edit', { file_path: path.join(s.repo, 'app.js') }).json.hookSpecificOutput.permissionDecision, 'deny');
+  assert.strictEqual(s.decision('Edit', { file_path: path.join(s.repo, 'app.js') }), 'deny');
   const types = s.events().map((e) => e.type);
   assert.ok(types.includes('pause') && types.includes('resume'));
 });
@@ -178,10 +324,66 @@ test('expired pause ends on its own', () => {
   const s = setup();
   s.prompt('/mentor:off rutyna');
   const st = s.state();
-  Object.values(st.pauses)[0].until = Date.now() - 1000;
-  fs.writeFileSync(path.join(s.data, 'state.json'), JSON.stringify(st));
-  assert.strictEqual(s.tool('Edit', { file_path: path.join(s.repo, 'app.js') }).json.hookSpecificOutput.permissionDecision, 'deny');
+  st.pause.until = Date.now() - 1000;
+  s.writeState(st);
+  assert.strictEqual(s.decision('Edit', { file_path: path.join(s.repo, 'app.js') }), 'deny');
   assert.ok(s.events().some((e) => e.type === 'resume' && e.auto));
+});
+
+test('from the third pause of the day the reason must be longer', () => {
+  const s = setup();
+  assert.strictEqual(s.prompt('/mentor:off hotfix').code, 0);
+  s.prompt('/mentor:on');
+  assert.strictEqual(s.prompt('/mentor:off spotkanie').code, 0);
+  s.prompt('/mentor:on');
+  const third = s.prompt('/mentor:off zmęczenie');
+  assert.strictEqual(third.code, 2);
+  assert.match(third.stderr, /3\. przerwa dzisiaj.*40 znaków/);
+  assert.strictEqual(s.prompt('/mentor:off produkcja leży, klient czeka na poprawkę konfiguracji DNS').code, 0);
+  assert.strictEqual(s.events().filter((e) => e.type === 'pause').pop().today, 3);
+});
+
+test('a pause in one project leaves the other one blocked', () => {
+  const a = setup();
+  const b = setup({ root: a.root });
+  assert.strictEqual(a.prompt('/mentor:off hotfix').code, 0);
+  assert.strictEqual(a.tool('Edit', { file_path: path.join(a.repo, 'app.js') }).stdout, '');
+  assert.strictEqual(b.decision('Edit', { file_path: path.join(b.repo, 'app.js') }), 'deny');
+  assert.match(ctx(b.prompt('co dalej?')), /ACTIVE/);
+  assert.match(ctx(a.prompt('co dalej?')), /PAUSED in this project/);
+  assert.notStrictEqual(a.stateFile(), b.stateFile(), 'one state file per project');
+});
+
+test('a session opened in a subdirectory shares the task and the pause of the repo', () => {
+  const s = setup();
+  s.prompt('/mentor:task w korzeniu');
+  fs.mkdirSync(path.join(s.repo, 'src'));
+  s.env.CLAUDE_PROJECT_DIR = path.join(s.repo, 'src');
+  assert.match(ctx(s.prompt('gdzie jestem?')), /task: "w korzeniu"/);
+  s.prompt('/mentor:off hotfix');
+  s.env.CLAUDE_PROJECT_DIR = s.repo;
+  assert.match(ctx(s.prompt('co dalej?')), /PAUSED/);
+});
+
+test('state.json from 0.2 is migrated per project', () => {
+  const s = setup();
+  fs.mkdirSync(s.data, { recursive: true });
+  const top = execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: s.repo, encoding: 'utf8' }).trim();
+  const key = path.resolve(top);
+  const k = process.platform === 'win32' ? key.toLowerCase() : key;
+  fs.writeFileSync(path.join(s.data, 'state.json'), JSON.stringify({
+    pauses: {}, tasks: { [k]: { title: 'stare zadanie', startedAt: Date.now(), hint: 2, fingerprint: 'x', head: null } },
+  }));
+  assert.match(ctx(s.prompt('co dalej?')), /task: "stare zadanie" · hint level 2\/4/);
+  assert.ok(s.state().task.baseline, 'a task from 0.2 gets a baseline on first use');
+});
+
+test('broken state file does not lock the user out', () => {
+  const s = setup();
+  s.prompt('/mentor:task x');
+  fs.writeFileSync(s.stateFile(), '{not json');
+  assert.strictEqual(s.prompt('jak to działa?').code, 0);
+  assert.strictEqual(s.decision('Edit', { file_path: path.join(s.repo, 'app.js') }), 'deny');
 });
 
 test('done closes the task, writes the journal; review-week sums it up', () => {
@@ -189,11 +391,11 @@ test('done closes the task, writes the journal; review-week sums it up', () => {
   s.prompt('/mentor:task walidacja IP');
   s.prompt('/mentor:hint');
   s.prompt('/mentor:hint');
-  fs.appendFileSync(path.join(s.repo, 'app.js'), '// my attempt\n');
+  s.append('app.js', '// my attempt\n');
   const done = s.prompt('/mentor:done regex nie wystarcza, trzeba sprawdzić zakres oktetów');
   assert.match(ctx(done), /Highest hint level: 2\/4.*Repo changed since the task started: yes/);
   assert.match(done.json.systemMessage, /Zamknięte: walidacja IP · podpowiedzi 2\/4/);
-  assert.deepStrictEqual(s.state().tasks, {});
+  assert.strictEqual(s.state().task, null);
 
   const journal = fs.readFileSync(path.join(s.data, 'LEARNING.md'), 'utf8');
   assert.match(journal, /— walidacja IP/);
@@ -214,43 +416,81 @@ test('done without a task says so', () => {
   assert.match(r.json.systemMessage, /Brak otwartego zadania/);
 });
 
+test('done shows new files with their content, commits, and leaves lock files out', () => {
+  const s = setup();
+  s.append('old-dirt.js', 'before the task\n');
+  s.prompt('/mentor:task review');
+  s.append('app.js', 'const committed = 1;\n');
+  commit(s.repo, 'wip');
+  fs.writeFileSync(path.join(s.repo, 'feature.js'), 'export function feature() {\n  return 42;\n}\n');
+  fs.writeFileSync(path.join(s.repo, 'package-lock.json'), '{"lockfileVersion": 3}\n');
+  const text = ctx(s.prompt('/mentor:done'));
+  assert.match(text, /app\.js \| \+1 -0/);
+  assert.match(text, /feature\.js \| \+3 -0 \(new, untracked\)/);
+  assert.match(text, /\+const committed = 1;/);
+  assert.match(text, /\+export function feature\(\) \{\n\+  return 42;/);
+  assert.match(text, /git status --short:\n.*\?\? feature\.js/s);
+  assert.match(text, /commits during the task included/);
+  assert.doesNotMatch(text, /lockfileVersion/);
+  assert.doesNotMatch(text, /before the task\n/, 'old dirt is left out of the diff');
+});
+
+test('done fits whole files into the budget and lists the rest', () => {
+  const s = setup();
+  s.prompt('/mentor:task duży diff');
+  fs.writeFileSync(path.join(s.repo, 'a-small.js'), 'small();\n');
+  fs.writeFileSync(path.join(s.repo, 'b-big.js'), 'x'.repeat(20000) + '\n');
+  fs.writeFileSync(path.join(s.repo, 'c-small.js'), 'also();\n');
+  const text = ctx(s.prompt('/mentor:done'));
+  assert.match(text, /\+small\(\);/);
+  assert.match(text, /\+also\(\);/);
+  assert.match(text, /Not included, the diff budget ran out: b-big\.js/);
+
+  const one = setup();
+  one.prompt('/mentor:task jeden wielki plik');
+  one.append('app.js', 'y'.repeat(20000) + '\n');
+  assert.match(ctx(one.prompt('/mentor:done')), /app\.js cut at 12000 characters/);
+});
+
+test('work time skips the night and paused time', () => {
+  const s = setup();
+  s.prompt('/mentor:task na noc');
+  const st = s.state();
+  st.task.startedAt = st.task.lastActiveAt = Date.now() - 17 * 3600000;
+  s.writeState(st);
+  const done = s.prompt('/mentor:done');
+  assert.match(ctx(done), /Work time: 60 min \(open for 1020 min\)/);
+  const event = s.events().find((e) => e.type === 'task_done');
+  assert.strictEqual(event.minutes, 60);
+  assert.strictEqual(event.wallMinutes, 1020);
+
+  const p = setup();
+  p.prompt('/mentor:task z przerwą');
+  const ps = p.state();
+  const t0 = Date.now() - 50 * 60000;
+  ps.task.startedAt = ps.task.lastActiveAt = t0;
+  ps.pause = { until: t0 + 40 * 60000, reason: 'rutyna' };
+  p.writeState(ps);
+  assert.match(ctx(p.prompt('/mentor:done')), /Work time: 10 min/);
+});
+
 test('outside a git repo the gate stays open', () => {
   const s = setup({ git: false });
   assert.strictEqual(s.prompt('napisz funkcję').code, 0);
 });
 
-test('other slash commands pass untouched by the gate', () => {
-  const s = setup();
-  assert.strictEqual(s.prompt('/review napisz mi to').code, 0);
-});
-
-test('english messages', () => {
+test('english messages and the language from the locale', () => {
   const s = setup();
   s.env.CLAUDE_PLUGIN_OPTION_LANGUAGE = 'en';
   const r = s.prompt('write me the code for it');
   assert.strictEqual(r.code, 2);
   assert.match(r.stderr, /your attempt first/);
-});
 
-test('broken state file does not lock the user out', () => {
-  const s = setup();
-  fs.mkdirSync(s.data, { recursive: true });
-  fs.writeFileSync(path.join(s.data, 'state.json'), '{not json');
-  assert.strictEqual(s.prompt('jak to działa?').code, 0);
-  assert.strictEqual(s.tool('Edit', { file_path: path.join(s.repo, 'app.js') }).json.hookSpecificOutput.permissionDecision, 'deny');
-});
-
-// --- 0.2.0 ---
-
-test('first-person Polish verbs are not orders (\b vs diacritics)', () => {
-  const s = setup();
-  for (const p of ['Myślę, że napiszę tu serwis i dopiszę walidację — czy to dobry kierunek?',
-    'Sam to przepiszę, tylko powiedz gdzie leży interfejs', 'Poprawię to jutro', 'jak to naprawić?']) {
-    assert.strictEqual(s.prompt(p).code, 0, `should pass: ${p}`);
-  }
-  for (const p of ['napisz to', 'NAPISZ walidację', 'Popraw mi to', 'pokaż mi rozwiązanie', 'pokaz mi kod', 'zrób to za mnie']) {
-    assert.strictEqual(s.prompt(p).code, 2, `should block: ${p}`);
-  }
+  s.env.CLAUDE_PLUGIN_OPTION_LANGUAGE = '';
+  s.env.LANG = 'pl_PL.UTF-8';
+  assert.match(s.prompt('napisz to').stderr, /najpierw Twoja próba/);
+  s.env.LANG = 'en_US.UTF-8';
+  assert.match(s.prompt('napisz to').stderr, /your attempt first/);
 });
 
 test('custom gate_regex without the u flag still works', () => {
@@ -263,101 +503,19 @@ test('custom gate_regex without the u flag still works', () => {
 test('committing work in progress during a task counts as an attempt', () => {
   const s = setup();
   s.prompt('/mentor:task walidacja');
-  fs.appendFileSync(path.join(s.repo, 'app.js'), 'function isIp() {}\n');
+  s.append('app.js', lines(3, 'isIp'));
   commit(s.repo, 'wip');
   assert.strictEqual(s.prompt('popraw mój kod').code, 0);
 });
 
-test('untracked files with Polish names are tracked by the fingerprint', () => {
+test('untracked files with Polish names are seen by the snapshot', () => {
   const s = setup();
-  const file = path.join(s.repo, 'zadanie-ż.js');
-  fs.writeFileSync(file, 'a\n');
+  const file = 'zadanie-ż.js';
+  s.append(file, 'a\n');
   s.prompt('/mentor:task polskie nazwy');
   assert.strictEqual(s.prompt('napisz to').code, 2);
-  fs.appendFileSync(file, 'moja próba\n');
+  s.append(file, lines(3, 'moja próba'));
   assert.strictEqual(s.prompt('napisz to').code, 0);
-});
-
-test('implicit task on a dirty repo keeps the earlier work as the attempt', () => {
-  const s = setup();
-  fs.appendFileSync(path.join(s.repo, 'app.js'), '// my own start\n');
-  s.prompt('/mentor:hint utknąłem na parserze');
-  assert.strictEqual(s.prompt('pokaż mi rozwiązanie').code, 0);
-
-  const clean = setup();
-  clean.prompt('/mentor:hint');
-  assert.strictEqual(clean.prompt('pokaż mi rozwiązanie').code, 2, 'a clean repo still needs an attempt');
-});
-
-test('a pause in one project leaves the other one blocked', () => {
-  const a = setup();
-  const b = setup({ root: a.root });
-  assert.strictEqual(a.prompt('/mentor:off hotfix').code, 0);
-  assert.strictEqual(a.tool('Edit', { file_path: path.join(a.repo, 'app.js') }).stdout, '');
-  assert.strictEqual(b.tool('Edit', { file_path: path.join(b.repo, 'app.js') }).json.hookSpecificOutput.permissionDecision, 'deny');
-  assert.match(ctx(b.prompt('co dalej?')), /ACTIVE/);
-  assert.match(ctx(a.prompt('co dalej?')), /PAUSED in this project/);
-});
-
-test('work time skips the night and paused time', () => {
-  const s = setup();
-  s.prompt('/mentor:task na noc');
-  const st = s.state();
-  const task = Object.values(st.tasks)[0];
-  task.startedAt = task.lastActiveAt = Date.now() - 17 * 3600000;
-  fs.writeFileSync(path.join(s.data, 'state.json'), JSON.stringify(st));
-  const done = s.prompt('/mentor:done');
-  assert.match(ctx(done), /Work time: 60 min \(open for 1020 min\)/);
-  const event = s.events().find((e) => e.type === 'task_done');
-  assert.strictEqual(event.minutes, 60);
-  assert.strictEqual(event.wallMinutes, 1020);
-
-  const p = setup();
-  p.prompt('/mentor:task z przerwą');
-  const ps = p.state();
-  const pt = Object.values(ps.tasks)[0];
-  const t0 = Date.now() - 50 * 60000;
-  pt.startedAt = pt.lastActiveAt = t0;
-  ps.pauses[Object.keys(ps.tasks)[0]] = { until: t0 + 40 * 60000, reason: 'rutyna' };
-  fs.writeFileSync(path.join(p.data, 'state.json'), JSON.stringify(ps));
-  assert.match(ctx(p.prompt('/mentor:done')), /Work time: 10 min/);
-});
-
-test('quoted comparisons are not redirects', () => {
-  for (const cmd of ["jq '.items[] | select(.count > 0)' data.json", 'node -e "console.log(arr.length > 0)"',
-    "python -c 'print(1 > 0)'", 'git log --format="%h > %s"']) {
-    assert.ok(!looksLikeWrite(cmd), `should pass: ${cmd}`);
-  }
-  for (const cmd of ['echo "x > y" > out.txt', "jq '.a' in.json > out.json", 'node -e "x>0" >> log.txt']) {
-    assert.ok(looksLikeWrite(cmd), `should flag: ${cmd}`);
-  }
-});
-
-test('done injects status and the diff since the task start, including commits', () => {
-  const s = setup();
-  s.prompt('/mentor:task review');
-  fs.appendFileSync(path.join(s.repo, 'app.js'), 'const committed = 1;\n');
-  commit(s.repo, 'wip');
-  fs.writeFileSync(path.join(s.repo, 'new.js'), 'untracked\n');
-  const text = ctx(s.prompt('/mentor:done'));
-  assert.match(text, /git status --short:\n\?\? new\.js/);
-  assert.match(text, /\+const committed = 1;/);
-  assert.match(text, /including work committed during the task/);
-
-  const big = setup();
-  big.prompt('/mentor:task duży diff');
-  fs.appendFileSync(path.join(big.repo, 'app.js'), 'x'.repeat(20000) + '\n');
-  assert.match(ctx(big.prompt('/mentor:done')), /diff truncated at 8000 characters/);
-});
-
-test('whats-new is logged and gets the journal path', () => {
-  const s = setup();
-  s.env.CLAUDE_PLUGIN_OPTION_FOCUS_TOPICS = 'Angular signals';
-  const r = s.prompt('/mentor:whats-new angular');
-  assert.match(ctx(r), /not created yet/);
-  assert.match(ctx(r), /Angular signals/);
-  assert.ok(s.events().some((e) => e.type === 'whats_new' && e.arg === 'angular'));
-  assert.match(ctx(s.prompt('/mentor:review-week')), /what's-new checks: 1/);
 });
 
 test('/mentor:try opens the gate without touching files and needs a real sentence', () => {
@@ -372,9 +530,104 @@ test('/mentor:try opens the gate without touching files and needs a real sentenc
   assert.match(ctx(s.prompt('/mentor:review-week')), /\/mentor:try: 1/);
 });
 
-test('session start names the journal even before it exists', () => {
+test('whats-new is logged and gets the journal path', () => {
   const s = setup();
-  const r = s.run('session-start.js', { hook_event_name: 'SessionStart', source: 'startup' });
-  assert.match(ctx(r), /Learning journal: .*LEARNING\.md \(not created yet\)/);
-  assert.match(ctx(r), /\/mentor:try/);
+  s.env.CLAUDE_PLUGIN_OPTION_FOCUS_TOPICS = 'Angular signals';
+  const r = s.prompt('/mentor:whats-new angular');
+  assert.match(ctx(r), /not created yet/);
+  assert.match(ctx(r), /Angular signals/);
+  assert.ok(s.events().some((e) => e.type === 'whats_new' && e.arg === 'angular'));
+  assert.match(ctx(s.prompt('/mentor:review-week')), /what's-new checks: 1/);
+});
+
+test('activation = marker: off until /mentor:enable or a .mentor file', () => {
+  const s = setup();
+  s.env.CLAUDE_PLUGIN_OPTION_ACTIVATION = 'marker';
+  assert.match(ctx(s.start()), /OFF in this project/);
+  assert.strictEqual(s.prompt('napisz to').code, 0);
+  assert.strictEqual(s.tool('Edit', { file_path: path.join(s.repo, 'app.js') }).stdout, '');
+  assert.match(s.prompt('/mentor:task x').json.systemMessage, /nie jest włączony/);
+
+  assert.match(s.prompt('/mentor:enable').json.systemMessage, /włączony w tym repo/);
+  assert.strictEqual(s.decision('Edit', { file_path: path.join(s.repo, 'app.js') }), 'deny');
+  assert.match(s.prompt('/mentor:disable').json.systemMessage, /wyłączony w tym repo/);
+  assert.strictEqual(s.tool('Edit', { file_path: path.join(s.repo, 'app.js') }).stdout, '');
+
+  s.append('.mentor', '');
+  assert.strictEqual(s.decision('Edit', { file_path: path.join(s.repo, 'app.js') }), 'deny');
+  assert.match(s.prompt('/mentor:disable').json.systemMessage, /plik \.mentor/);
+  assert.strictEqual(s.prompt('napisz to').code, 2, 'the .mentor file itself is not an attempt');
+  assert.match(ctx(s.prompt('/mentor:review-week')), /\/mentor:disable\): 2/);
+
+  const always = setup();
+  assert.match(always.prompt('/mentor:disable').json.systemMessage, /activation = always/);
+});
+
+test('Stop hook logs large code blocks in answers while mentor mode is active', () => {
+  const s = setup();
+  s.prompt('/mentor:task kod w czacie');
+  const big = 'Here it is:\n```js\n' + lines(20) + '```\n';
+  assert.strictEqual(s.stop({ last_assistant_message: 'Look at line 12 of app.js.\n```js\nconst a = 1;\n```' }).code, 0);
+  assert.strictEqual(s.stop({ last_assistant_message: big }).code, 0);
+
+  const transcript = path.join(s.root, 'transcript.jsonl');
+  fs.writeFileSync(transcript, [
+    { type: 'user', message: { content: 'napisz to' } },
+    { type: 'assistant', message: { content: [{ type: 'text', text: '```ts\n' + lines(9) }] } },
+    { type: 'user', message: { content: [{ type: 'tool_result', content: 'ok' }] } },
+    { type: 'assistant', message: { content: [{ type: 'text', text: lines(9) + '```' }] } },
+  ].map((e) => JSON.stringify(e)).join('\n') + '\n');
+  s.stop({ transcript_path: transcript });
+
+  const logged = s.events().filter((e) => e.type === 'code_in_chat');
+  assert.deepStrictEqual(logged.map((e) => e.lines), [20, 18]);
+  assert.strictEqual(logged[0].task, 'kod w czacie');
+  assert.match(ctx(s.prompt('/mentor:review-week')), /large code block while mentor mode was active: 2 \(20 lines at hint 0\/4/);
+
+  s.prompt('/mentor:off normalny tryb na chwilę');
+  s.stop({ last_assistant_message: big });
+  assert.strictEqual(s.events().filter((e) => e.type === 'code_in_chat').length, 2, 'not logged during a pause');
+  assert.strictEqual(codeLines('~~~\na\n```\nb\n~~~\nc'), 3, 'a ``` line inside a ~~~ block is content, not its end');
+});
+
+test('due repetition items are counted at session start and in the review', () => {
+  const s = setup();
+  fs.mkdirSync(s.data, { recursive: true });
+  fs.writeFileSync(path.join(s.data, 'LEARNING.md'), [
+    '- [ ] repeat: RxJS switchMap (box 1, due 2000-01-01)',
+    '- [ ] repeat: Angular signals (box 3, due 2999-01-01)',
+    '- repeat: change detection',
+    '- [x] repeat: closures (mastered 2026-01-01)',
+  ].join('\n'));
+  assert.match(ctx(s.start()), /2 repetition topic\(s\) in the learning journal are due/);
+  assert.match(ctx(s.prompt('/mentor:review-week')), /Repetition items due today or earlier: 2/);
+});
+
+test('events carry a project id; same folder names are told apart; old events are pruned', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mentor-test-'));
+  const mk = (sub) => {
+    fs.mkdirSync(path.join(root, sub));
+    return setup({ root: path.join(root, sub) });
+  };
+  const a = mk('a');
+  const b = mk('b');
+  // Same basename in two places: rename both repos to "app".
+  for (const s of [a, b]) {
+    const target = path.join(path.dirname(s.repo), 'app');
+    fs.renameSync(s.repo, target);
+    s.repo = target;
+    s.env.CLAUDE_PROJECT_DIR = target;
+  }
+  b.env.CLAUDE_PLUGIN_DATA = a.data;
+  b.data = a.data;
+  a.prompt('/mentor:off pierwszy projekt');
+  b.prompt('/mentor:off drugi projekt');
+  const pauses = a.events().filter((e) => e.type === 'pause');
+  assert.notStrictEqual(pauses[0].pid, pauses[1].pid);
+  assert.match(ctx(a.prompt('/mentor:review-week')), /\[app#\w{4}\] pierwszy projekt[\s\S]*\[app#\w{4}\] drugi projekt/);
+
+  const old = JSON.stringify({ ts: '2000-01-01T00:00:00.000Z', type: 'pause', project: 'x', reason: 'stare' });
+  fs.appendFileSync(path.join(a.data, 'events.jsonl'), old + '\n');
+  a.start();
+  assert.ok(!a.events().some((e) => e.reason === 'stare'), 'events older than keep_days are removed');
 });

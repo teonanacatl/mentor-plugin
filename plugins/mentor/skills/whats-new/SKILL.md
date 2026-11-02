@@ -28,7 +28,9 @@ $ARGUMENTS (if empty: the main frameworks of the repo and the focus topics
    ```
    ## What's new YYYY-MM-DD
    - <package>: <installed> → <latest>
-   - [ ] repeat: <topic for the quiz>
+   - [ ] repeat: <topic for the quiz> (box 1, due <tomorrow>)
    ```
+
+   Today's date is in the `[mentor]` lines.
 
 Answer in the user's language. Mark anything you could not verify in a source as unverified.

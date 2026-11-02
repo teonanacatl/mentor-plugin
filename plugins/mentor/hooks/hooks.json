@@ -1,5 +1,5 @@
 {
-  "description": "Mentor mode: session status, prompt gate and edit blocking",
+  "description": "Mentor mode: session status, prompt gate, edit blocking and a log of code in chat",
   "hooks": {
     "SessionStart": [
       {
@@ -27,12 +27,24 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell",
+        "matcher": "^(Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell)$|^mcp__.*",
         "hooks": [
           {
             "type": "command",
             "command": "node",
             "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/pre-tool.js"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/chat-check.js"],
             "timeout": 10
           }
         ]

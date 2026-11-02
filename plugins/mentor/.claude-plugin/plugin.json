@@ -1,19 +1,27 @@
 {
   "name": "mentor",
   "displayName": "Mentor",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Mentor mode: Claude points the way instead of writing your code. Blocks file edits, gates requests for ready-made code until you have tried, escalates hints step by step and reviews your week.",
   "author": {
     "name": "Przemysław Lewalski"
   },
+  "repository": "https://github.com/teonanacatl/mentor-plugin",
   "license": "MIT",
   "keywords": ["learning", "mentor", "skills", "deliberate-practice"],
+  "icon": "./icon.svg",
   "userConfig": {
     "language": {
       "type": "string",
       "title": "Language of hook messages",
-      "description": "pl or en. Claude itself answers in the language you write in.",
-      "default": "pl"
+      "description": "pl or en. Empty = from the system locale. Claude itself answers in the language you write in.",
+      "default": ""
+    },
+    "activation": {
+      "type": "string",
+      "title": "Where mentor mode applies",
+      "description": "always = in every repo where the plugin is enabled. marker = only in repos with a .mentor file at the root or turned on with /mentor:enable (safe for a global install).",
+      "default": "always"
     },
     "off_minutes": {
       "type": "number",
@@ -23,6 +31,20 @@
       "min": 5,
       "max": 240
     },
+    "attempt_min_lines": {
+      "type": "number",
+      "title": "Lines that count as an attempt",
+      "description": "How many changed lines of code (since the task or the session started) open the try-first gate.",
+      "default": 3,
+      "min": 1,
+      "max": 100
+    },
+    "attempt_ignore": {
+      "type": "string",
+      "title": "Extra files that do not count as an attempt",
+      "description": "Comma-separated globs on top of the built-in list (lock files, dist/, build/, coverage/, *.log…), e.g. 'src/generated/, *.snap'.",
+      "default": ""
+    },
     "focus_topics": {
       "type": "string",
       "title": "Focus topics",
@@ -31,9 +53,31 @@
     },
     "bash_guard": {
       "type": "boolean",
-      "title": "Ask before file-writing shell commands",
-      "description": "Best effort: shell commands that look like they write files (redirects, sed -i, Set-Content, git apply…) trigger a permission prompt while mentor mode is on.",
+      "title": "Guard file-writing shell commands",
+      "description": "Best effort: shell commands that look like they write files (redirects, sed -i, Set-Content, git checkout…) trigger a permission prompt while mentor mode is on.",
       "default": true
+    },
+    "bash_guard_deny": {
+      "type": "boolean",
+      "title": "Deny instead of asking",
+      "description": "The shell guard denies those commands instead of asking. Use it when your permission mode accepts prompts automatically.",
+      "default": false
+    },
+    "chat_code_lines": {
+      "type": "number",
+      "title": "Code lines in an answer that get logged",
+      "description": "An answer with at least this many lines in code blocks while mentor mode is active is logged for the weekly review. It is never blocked.",
+      "default": 15,
+      "min": 3,
+      "max": 500
+    },
+    "keep_days": {
+      "type": "number",
+      "title": "Keep the events log (days)",
+      "description": "Older events are removed from events.jsonl once a day. The learning journal is never pruned.",
+      "default": 90,
+      "min": 7,
+      "max": 3650
     },
     "gate_regex": {
       "type": "string",

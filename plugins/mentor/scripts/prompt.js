@@ -3,10 +3,15 @@
 // and adds a one-line mentor status to Claude's context.
 
 const fs = require('fs');
+const path = require('path');
 const lib = require('./lib');
 
-const COMMAND = /^\/mentor:(task|hint|try|done|off|on|status|review-week|whats-new)\b\s*([\s\S]*)$/i;
+const COMMAND = /^\/mentor:(task|hint|try|done|off|on|status|review-week|whats-new|enable|disable)\b\s*([\s\S]*)$/i;
+// Only a real slash command skips the gate, not any prompt that happens to start with "/".
+const SLASH_COMMAND = /^\/[\w:.-]+(\s|$)/;
 const MIN_TRY_LENGTH = 20;
+// Commands that only make sense where mentor mode applies.
+const NEEDS_ENABLED = new Set(['task', 'hint', 'try', 'done', 'off', 'on']);
 
 function context(text, systemMessage) {
   const out = { hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: text } };
@@ -14,39 +19,45 @@ function context(text, systemMessage) {
   lib.respond(out);
 }
 
-// An implicit task (opened by /mentor:hint or /mentor:try) on a repo that is already dirty
-// counts the work done so far as the attempt. An explicit /mentor:task does not.
-function newTask(dir, title, now, implicit) {
-  const task = {
-    title, startedAt: now, lastActiveAt: now, activeMs: 0, hint: 0,
-    fingerprint: lib.fingerprint(dir), head: lib.headCommit(dir), attempted: Boolean(implicit && lib.isDirty(dir)),
-  };
-  lib.logEvent(dir, 'task_start', implicit ? { title, implicit: true } : { title });
-  return task;
+// An explicit /mentor:task starts from the repo as it is now: earlier changes do not count.
+// An implicit task (opened by /mentor:hint or /mentor:try) keeps the session's baseline, so the
+// work done in this session counts as the attempt.
+function newTask(ctx, title, implicit) {
+  const { cfg, proj, state, input, now } = ctx;
+  const baseline = implicit
+    ? lib.sessionBaseline(proj, cfg, state, input.session_id, now)
+    : lib.compact(lib.snapshot(proj, cfg));
+  lib.logEvent(proj, 'task_start', implicit ? { title, implicit: true } : { title });
+  return { title, startedAt: now, lastActiveAt: now, activeMs: 0, hint: 0, baseline, attempted: false };
 }
 
-function handleCommand(cfg, state, dir, key, name, args) {
-  const now = Date.now();
-  const paused = lib.isPaused(state, key);
-  const task = state.tasks[key];
+function handleCommand(ctx, name, args) {
+  const { cfg, proj, state, now } = ctx;
+  const paused = lib.isPaused(state);
+  const task = state.task;
   if (task) lib.touchTask(task, paused, now);
+  const save = () => lib.saveState(proj, state);
+
+  if (NEEDS_ENABLED.has(name) && !lib.isEnabled(cfg, proj, state)) {
+    return context(lib.statusLine(cfg, proj, state), lib.t(cfg, 'inactive'));
+  }
 
   switch (name) {
     case 'task': {
       if (!args) lib.blockPrompt(lib.t(cfg, 'taskNeedsTitle'));
-      state.tasks[key] = newTask(dir, args, now, false);
-      lib.saveState(state);
+      state.task = newTask(ctx, args, false);
+      save();
       return context(`[mentor] New task started: "${args}". Hint level 0/${lib.MAX_HINT}.`,
         lib.t(cfg, 'taskStarted', { task: args }));
     }
 
     case 'hint': {
-      const current = task || newTask(dir, args || '(untitled)', now, true);
+      const current = task || newTask(ctx, args || '(untitled)', true);
       const atMax = current.hint >= lib.MAX_HINT;
       current.hint = Math.min(lib.MAX_HINT, current.hint + 1);
-      state.tasks[key] = current;
-      lib.logEvent(dir, 'hint', { title: current.title, level: current.hint });
-      lib.saveState(state);
+      state.task = current;
+      lib.logEvent(proj, 'hint', { title: current.title, level: current.hint });
+      save();
       const n = current.hint;
       const text = `[mentor] Hint requested for task "${current.title}". Hint level is now ${n}/${lib.MAX_HINT}. ` +
         `Scope allowed at this level: ${lib.LEVEL_SCOPE[n]}.` +
@@ -57,11 +68,11 @@ function handleCommand(cfg, state, dir, key, name, args) {
 
     case 'try': {
       if (args.length < MIN_TRY_LENGTH) lib.blockPrompt(lib.t(cfg, 'tryNeedsText'));
-      const current = task || newTask(dir, args.slice(0, 60), now, true);
+      const current = task || newTask(ctx, args.slice(0, 60), true);
       current.attempted = true;
-      state.tasks[key] = current;
-      lib.logEvent(dir, 'try', { title: current.title, text: args.slice(0, 200) });
-      lib.saveState(state);
+      state.task = current;
+      lib.logEvent(proj, 'try', { title: current.title, text: args.slice(0, 200) });
+      save();
       return context(
         `[mentor] The user describes their own attempt or hypothesis for task "${current.title}": "${args}". ` +
         `The try-first gate for this task is now open. Hint level stays ${current.hint}/${lib.MAX_HINT}.`,
@@ -72,112 +83,154 @@ function handleCommand(cfg, state, dir, key, name, args) {
       if (!task) return context('[mentor] /mentor:done was typed, but no task is open in this project.', lib.t(cfg, 'noTask'));
       const minutes = Math.round((task.activeMs || 0) / 60000);
       const wallMinutes = Math.round((now - task.startedAt) / 60000);
-      const fp = lib.fingerprint(dir);
-      const changed = fp === null || task.fingerprint === null ? null : fp !== task.fingerprint;
-      const changes = lib.changesSince(dir, task.head);
-      lib.logEvent(dir, 'task_done', { title: task.title, hint: task.hint, minutes, wallMinutes, changed, learned: args || '' });
+      const review = lib.reviewDiff(proj, cfg, task.baseline);
+      const changed = review ? review.stat !== '' : null;
+      lib.logEvent(proj, 'task_done', { title: task.title, hint: task.hint, minutes, wallMinutes, changed, learned: args || '' });
       lib.appendLearning(
         `## ${new Date(now).toISOString().slice(0, 10)} — ${task.title}\n` +
         `- hints: ${task.hint}/${lib.MAX_HINT} (${lib.LEVELS.en[task.hint]}) · ${minutes} min of work\n` +
         (args ? `- in my words: ${args}\n` : ''));
-      delete state.tasks[key];
-      lib.saveState(state);
+      state.task = null;
+      save();
       const changedText = changed === null ? 'unknown (not a git repo)' : changed ? 'yes' : 'no';
       let text =
         `[mentor] Task closed: "${task.title}". Highest hint level: ${task.hint}/${lib.MAX_HINT} ` +
         `(${lib.LEVELS.en[task.hint]}). Work time: ${minutes} min (open for ${wallMinutes} min). ` +
         `Repo changed since the task started: ${changedText}. ` +
-        `User's own summary: ${args ? `"${args}"` : 'none given'}. An entry was appended to the learning journal ${lib.LEARNING_FILE}.`;
-      if (changes) {
-        const base = task.head ? `commit ${task.head.slice(0, 7)} (where the task started)` : 'HEAD';
-        text += `\n[mentor] git status --short:\n${changes.status || '(clean)'}\n` +
-          `[mentor] git diff against ${base}, including work committed during the task:\n${changes.diff || '(no diff)'}`;
+        `User's own summary: ${args ? `"${args}"` : 'none given'}. An entry was appended to the learning journal ${lib.LEARNING_FILE}. ` +
+        `Today is ${new Date(now).toISOString().slice(0, 10)}.`;
+      if (review) {
+        const base = review.base === lib.EMPTY_TREE
+          ? 'the empty tree (no commits yet)'
+          : `commit ${review.base.slice(0, 7)} (where the task started)`;
+        text += `\n[mentor] Files changed during the task (against ${base}, commits during the task included, ` +
+          `new untracked files with their content; lock files and build output left out):\n${review.stat || '(none)'}\n` +
+          `[mentor] git status --short:\n${review.status || '(clean)'}\n` +
+          `[mentor] Diff of the files changed during the task:\n${review.diff || '(no diff)'}`;
+        if (review.omitted.length) {
+          text += `\n[mentor] Not included, the diff budget ran out: ${review.omitted.join(', ')}. ` +
+            `Run git diff ${review.base.slice(0, 7)} -- <file> (or read the file, if untracked) for these.`;
+        }
       }
       return context(text, lib.t(cfg, 'taskDone', { task: task.title, n: task.hint, min: minutes }));
     }
 
     case 'off': {
       if (!args) lib.blockPrompt(lib.t(cfg, 'offNeedsReason'));
+      const today = lib.pausesToday(now);
+      if (today >= lib.PAUSES_BEFORE_LONG_REASON && args.length < lib.LONG_REASON) {
+        lib.blockPrompt(lib.t(cfg, 'offNeedsLonger', { n: today + 1, need: lib.LONG_REASON }));
+      }
       const until = now + cfg.offMinutes * 60000;
-      state.pauses[key] = { until, reason: args };
-      lib.logEvent(dir, 'pause', { reason: args, minutes: cfg.offMinutes, task: task ? task.title : null });
-      lib.saveState(state);
-      return context(lib.statusLine(cfg, state, key), lib.t(cfg, 'paused', { time: lib.fmtTime(cfg, until), reason: args }));
+      state.pause = { until, reason: args };
+      lib.logEvent(proj, 'pause', { reason: args, minutes: cfg.offMinutes, task: task ? task.title : null, today: today + 1 });
+      save();
+      return context(lib.statusLine(cfg, proj, state), lib.t(cfg, 'paused', { time: lib.fmtTime(cfg, until), reason: args }));
     }
 
     case 'on': {
       if (paused) {
-        lib.logEvent(dir, 'resume', { auto: false });
-        delete state.pauses[key];
+        lib.logEvent(proj, 'resume', { auto: false });
+        state.pause = null;
         if (task) task.lastActiveAt = now;
       }
-      lib.saveState(state);
-      return context(lib.statusLine(cfg, state, key), lib.t(cfg, paused ? 'resumed' : 'alreadyActive'));
+      save();
+      return context(lib.statusLine(cfg, proj, state), lib.t(cfg, paused ? 'resumed' : 'alreadyActive'));
+    }
+
+    case 'enable':
+    case 'disable': {
+      if (cfg.activation === 'always') return context(lib.statusLine(cfg, proj, state), lib.t(cfg, 'activationAlways'));
+      state.enabled = name === 'enable';
+      lib.logEvent(proj, name);
+      save();
+      const marker = fs.existsSync(path.join(proj.dir, lib.MARKER));
+      const msg = name === 'enable' ? 'enabled' : marker ? 'disabledMarker' : 'disabled';
+      return context(lib.statusLine(cfg, proj, state), lib.t(cfg, msg));
     }
 
     case 'review-week': {
-      if (task) lib.saveState(state);
+      if (task) save();
       const days = Math.max(1, parseInt(args, 10) || 7);
       return context(
         `${lib.stats(days)}\nLearning journal: ${lib.LEARNING_FILE}\n` +
-        `Focus topics set by the user: ${cfg.focusTopics || 'none'}\n${lib.statusLine(cfg, state, key)}`);
+        `Today is ${new Date(now).toISOString().slice(0, 10)}. Repetition items due today or earlier: ${lib.dueRepeats(now)}.\n` +
+        `Focus topics set by the user: ${cfg.focusTopics || 'none'}\n${lib.statusLine(cfg, proj, state)}`);
     }
 
     case 'whats-new': {
-      if (task) lib.saveState(state);
-      lib.logEvent(dir, 'whats_new', { arg: args.slice(0, 120) });
+      if (task) save();
+      lib.logEvent(proj, 'whats_new', { arg: args.slice(0, 120) });
       const exists = fs.existsSync(lib.LEARNING_FILE);
       return context(
-        `[mentor] What's-new check requested${args ? ` for: ${args}` : ''}. ` +
+        `[mentor] What's-new check requested${args ? ` for: ${args}` : ''}. Today is ${new Date(now).toISOString().slice(0, 10)}. ` +
         `Learning journal: ${lib.LEARNING_FILE} (${exists ? 'exists' : 'not created yet; append creates it'}). ` +
-        `Focus topics set by the user: ${cfg.focusTopics || 'none'}.\n${lib.statusLine(cfg, state, key)}`);
+        `Focus topics set by the user: ${cfg.focusTopics || 'none'}.\n${lib.statusLine(cfg, proj, state)}`);
     }
 
     default: // status
-      if (task) lib.saveState(state);
-      return context(`${lib.statusLine(cfg, state, key)}\nLearning journal: ${lib.LEARNING_FILE}\n` +
-        `Events log: ${lib.EVENTS_FILE}\nFocus topics: ${cfg.focusTopics || 'none'}`);
+      if (task) save();
+      return context(`${lib.statusLine(cfg, proj, state)}\nLearning journal: ${lib.LEARNING_FILE}\n` +
+        `Events log: ${lib.EVENTS_FILE}\nFocus topics: ${cfg.focusTopics || 'none'}\n` +
+        `Activation: ${cfg.activation} · shell guard: ${cfg.bashGuard} · an attempt needs ${cfg.minLines} changed lines of code`);
   }
 }
 
-// True when the user has made an attempt that the gate accepts.
-function hasAttempt(dir, task) {
-  if (task && task.attempted) return true;
-  if (task && task.fingerprint) {
-    const fp = lib.fingerprint(dir);
-    return fp === null ? true : fp !== task.fingerprint;
-  }
-  const dirty = lib.isDirty(dir);
-  return dirty === null ? true : dirty; // outside git there is nothing to compare against
+// How much the user has changed since the task (or else the session) started.
+function attempt(ctx) {
+  const { cfg, proj, state, input } = ctx;
+  if (!proj.git) return { ok: true }; // outside git there is nothing to compare against
+  const task = state.task;
+  if (task && task.attempted) return { ok: true };
+  const session = state.sessions[input.session_id || 'default'];
+  const baseline = task ? task.baseline : session && session.baseline;
+  if (!baseline) return { ok: true };
+  const n = lib.attemptLines(proj, cfg, baseline);
+  return { ok: n >= cfg.minLines, n };
 }
 
 function main() {
   const input = lib.readInput();
   const prompt = String(input.prompt || '').trim();
   const cfg = lib.config();
-  const dir = lib.projectDir(input);
-  const key = lib.projectKey(dir);
-  const state = lib.loadState();
-  let changed = lib.expirePause(state, dir, key);
+  const proj = lib.project(input);
+  const state = lib.loadState(proj);
+  const now = Date.now();
+  const ctx = { cfg, proj, state, input, now };
+  let changed = lib.expirePause(proj, state);
 
   const cmd = prompt.match(COMMAND);
-  if (cmd) return handleCommand(cfg, state, dir, key, cmd[1].toLowerCase(), cmd[2].trim());
+  if (cmd) return handleCommand(ctx, cmd[1].toLowerCase(), cmd[2].trim());
 
-  const paused = lib.isPaused(state, key);
-  const task = state.tasks[key];
+  if (!lib.isEnabled(cfg, proj, state)) {
+    if (changed) lib.saveState(proj, state);
+    return context(lib.statusLine(cfg, proj, state));
+  }
+
+  const paused = lib.isPaused(state);
+  const task = state.task;
   if (task) {
-    lib.touchTask(task, paused, Date.now());
+    lib.touchTask(task, paused, now);
+    if (!task.baseline) task.baseline = lib.compact(lib.snapshot(proj, cfg)); // task from 0.2
     changed = true;
   }
-  if (changed) lib.saveState(state);
+  if (proj.git && !state.sessions[input.session_id || 'default']) {
+    lib.sessionBaseline(proj, cfg, state, input.session_id, now);
+    changed = true;
+  }
+  if (changed) lib.saveState(proj, state);
 
-  if (!prompt.startsWith('/') && !paused && lib.gate(cfg).test(prompt) && !hasAttempt(dir, task)) {
-    lib.logEvent(dir, 'gate_block', { task: task ? task.title : null, prompt: prompt.slice(0, 120) });
-    const why = task ? lib.t(cfg, 'whyTask', { task: task.title }) : lib.t(cfg, 'whyClean');
-    lib.blockPrompt(lib.t(cfg, 'gateBlocked', { why, min: cfg.offMinutes }));
+  if (!SLASH_COMMAND.test(prompt) && !paused && lib.asksForCode(cfg, prompt)) {
+    const a = attempt(ctx);
+    if (!a.ok) {
+      lib.logEvent(proj, 'gate_block', { task: task ? task.title : null, lines: a.n, prompt: prompt.slice(0, 120) });
+      const vars = { n: a.n, need: cfg.minLines, task: task ? task.title : '' };
+      const why = lib.t(cfg, task ? 'whyTask' : 'whySession', vars);
+      lib.blockPrompt(lib.t(cfg, 'gateBlocked', { why, min: cfg.offMinutes }));
+    }
   }
 
-  context(lib.statusLine(cfg, state, key));
+  context(lib.statusLine(cfg, proj, state));
 }
 
 try {
