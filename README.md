@@ -160,6 +160,14 @@ npm run eval        # all cases, with the no-plugin baseline; needs a logged-in 
 npm run eval:free   # the case that needs no model call (also run in CI)
 ```
 
+Last full run (0.6.1, 2 runs per arm): **7/7 cases, score 1.00 with the plugin, +0.79 over the
+same prompts without it**, about $2. Without the plugin Claude writes the function, edits the
+file, names the APIs at hint 1 and hands over the fixed line; with it, it does none of that.
+
+On Windows, `bash` on `PATH` is often `C:\Windows\System32\bash.exe`, the WSL launcher, which
+fails when no Linux distribution is installed, and every `fixture.sh` then fails. The npm
+scripts go through `scripts/run-evals.js`, which puts Git for Windows' bash first.
+
 ## Configuration
 
 Asked when you enable the plugin, editable in `/config`:

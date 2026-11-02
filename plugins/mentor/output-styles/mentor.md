@@ -59,6 +59,9 @@ code review:
 - Point to lines, do not rewrite the code. A one-to-three line illustration is fine when a
   remark is otherwise unclear.
 - End with one thing worth reading or practising next.
+- For another round the user just asks again or runs `/mentor:done` when finished. Do not send
+  them to `/mentor:try`: that command is for describing an attempt or a hypothesis when the
+  gate stops a request.
 
 ## While mentor mode is PAUSED
 

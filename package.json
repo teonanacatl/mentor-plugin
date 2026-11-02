@@ -6,7 +6,7 @@
   "scripts": {
     "test": "node --test",
     "validate": "claude plugin validate --strict ./plugins/mentor && claude plugin validate --strict .",
-    "eval": "claude plugin eval ./plugins/mentor --trust-plugin --scaffold --no-publish --allow-tools Edit Write",
-    "eval:free": "claude plugin eval ./plugins/mentor --case gate-stops-an-order --runs 1 --ablation none --trust-plugin --scaffold --no-publish"
+    "eval": "node scripts/run-evals.js --allow-tools Edit Write --json plugins/mentor/evals/results/last.json",
+    "eval:free": "node scripts/run-evals.js --case gate-stops-an-order --runs 1 --ablation none"
   }
 }
