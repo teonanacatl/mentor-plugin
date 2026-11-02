@@ -20,8 +20,11 @@ function isAllowedPath(file, cwd) {
   return roots.some((root) => target === root || target.startsWith(root + path.sep));
 }
 
+// Checked with quoted strings removed, so `jq 'select(.n > 0)'` or `node -e "a > 0"` is not a redirect.
+const REDIRECT = /(^|[^0-9&<>=\-])>>?\s*[^\s&|>]/;
+const QUOTED = /"(?:\\.|[^"\\])*"|'[^']*'/g;
+
 const WRITE_PATTERNS = [
-  /(^|[^0-9&<>=\-])>>?\s*[^\s&|>]/, // redirect into a file
   /\b(sed|perl)\s+(-\w*i|--in-place)/,
   /\btee\b/,
   /\bgit\s+(apply|am|restore|reset\s+--hard|stash\s+pop)\b|\bgit\s+checkout\s+--(\s|$)/,
@@ -37,7 +40,7 @@ function looksLikeWrite(command) {
   const cleaned = String(command || '')
     .replace(/\d?>\s*&\s*\d/g, ' ')
     .replace(/\d?>\s*(\/dev\/null|\$null|nul)\b/gi, ' ');
-  return WRITE_PATTERNS.some((re) => re.test(cleaned));
+  return REDIRECT.test(cleaned.replace(QUOTED, '""')) || WRITE_PATTERNS.some((re) => re.test(cleaned));
 }
 
 function decide(decision, reason) {
@@ -48,9 +51,10 @@ function main() {
   const input = lib.readInput();
   const cfg = lib.config();
   const dir = lib.projectDir(input);
+  const key = lib.projectKey(dir);
   const state = lib.loadState();
-  if (lib.expirePause(state, dir)) lib.saveState(state);
-  if (lib.isPaused(state)) process.exit(0);
+  if (lib.expirePause(state, dir, key)) lib.saveState(state);
+  if (lib.isPaused(state, key)) process.exit(0);
 
   const tool = input.tool_name;
   const toolInput = input.tool_input || {};

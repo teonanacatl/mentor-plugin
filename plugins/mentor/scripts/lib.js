@@ -15,6 +15,9 @@ const LEARNING_FILE = path.join(DATA_DIR, 'LEARNING.md');
 const ERROR_FILE = path.join(DATA_DIR, 'errors.log');
 
 const MAX_HINT = 4;
+// A gap between interactions longer than this counts only up to this much as work time.
+const IDLE_MS = 60 * 60000;
+const DIFF_LIMIT = 8000;
 const LEVELS = {
   en: ['none', 'direction', 'concept', 'API', 'sketch'],
   pl: ['brak', 'kierunek', 'koncept', 'API', 'szkic'],
@@ -28,16 +31,20 @@ const LEVEL_SCOPE = [
   'sketch: a skeleton or pseudocode with the key lines left as TODO for the user, never a complete working solution',
 ];
 
+// Word boundaries that know Polish letters: JS `\b` treats ę, ż… as non-word characters,
+// so `\bnapisz\b` would also match the first-person "napiszę".
+const B = '(?<![\\p{L}\\p{N}_])';
+const E = '(?![\\p{L}\\p{N}_])';
 // Built-in pattern for "give me ready-made code" prompts, Polish (with and without diacritics) and English.
 const DEFAULT_GATE = [
-  '\\b(napisz|zaimplementuj|zakoduj|wygeneruj|dopisz|przepisz|napraw|popraw)\\b',
-  '\\b(daj|poka[zż])\\s+(mi\\s+)?(ca[lł]y\\s+|gotowy\\s+)?(kod|gotowca|gotowe|rozwi[aą]zanie)',
-  '\\bzr[oó]b\\s+to(\\s+za\\s+mnie)?\\b',
-  '\\bwrite\\s+(me\\s+)?(the\\s+|a\\s+|this\\s+)?(code|function|implementation|component|class|test|script|fix)',
-  '\\bimplement\\s+(it|this|that|the)\\b',
-  '\\b(generate|give\\s+me|show\\s+me)\\s+(the\\s+)?(code|solution|implementation)',
-  '\\bfix\\s+(it|this|that)\\b',
-  '\\bjust\\s+do\\s+it\\b',
+  `${B}(napisz|zaimplementuj|zakoduj|wygeneruj|dopisz|przepisz|napraw|popraw)${E}`,
+  `${B}(daj|poka[zż])\\s+(mi\\s+)?(ca[lł]y\\s+|gotowy\\s+)?(kod|gotowca|gotowe|rozwi[aą]zanie)${E}`,
+  `${B}zr[oó]b\\s+to${E}`,
+  `${B}write\\s+(me\\s+)?(the\\s+|a\\s+|this\\s+)?(code|function|implementation|component|class|test|script|fix)`,
+  `${B}implement\\s+(it|this|that|the)${E}`,
+  `${B}(generate|give\\s+me|show\\s+me)\\s+(the\\s+)?(code|solution|implementation)`,
+  `${B}fix\\s+(it|this|that)${E}`,
+  `${B}just\\s+do\\s+it${E}`,
 ].join('|');
 
 const MESSAGES = {
@@ -46,19 +53,22 @@ const MESSAGES = {
       '🧭 Mentor: najpierw Twoja próba. {why}\n' +
       "Prośba o gotowy kod nie poszła do Claude'a. Możesz:\n" +
       '  • /mentor:hint — wziąć kolejny poziom podpowiedzi\n' +
+      '  • /mentor:try <hipoteza> — opisać własną diagnozę albo pomysł (bez edycji plików)\n' +
       '  • zapisać w kodzie choćby szkic, a potem poprosić o review\n' +
       '  • /mentor:off <powód> — zrobić przerwę na {min} min (trafia do przeglądu tygodnia)',
     whyTask: 'Od startu zadania „{task}” w repo nic się nie zmieniło.',
     whyClean: 'W repo nie ma żadnych zmian.',
     offNeedsReason: '🧭 Mentor: podaj powód przerwy, np. /mentor:off pilny hotfix. Powód trafia do przeglądu tygodnia.',
     taskNeedsTitle: '🧭 Mentor: podaj nazwę zadania, np. /mentor:task walidacja formularza.',
-    paused: '🧭 Mentor wstrzymany do {time}. Powód: {reason}',
+    tryNeedsText: '🧭 Mentor: opisz swoją próbę albo hipotezę choć jednym pełnym zdaniem, np. /mentor:try podejrzewam, że subskrypcja nie jest odnawiana po zmianie trasy.',
+    tryAccepted: '🧭 Próba zapisana. Bramka dla „{task}” otwarta.',
+    paused: '🧭 Mentor wstrzymany w tym repo do {time}. Powód: {reason}',
     resumed: '🧭 Mentor znów aktywny.',
     alreadyActive: '🧭 Mentor był aktywny.',
     taskStarted: '🧭 Zadanie: {task}. Podpowiedzi od zera.',
     hintLevel: '🧭 Podpowiedź {n}/4 · {name}',
     hintMax: '🧭 Podpowiedź 4/4 · szkic (wyżej drabina nie sięga)',
-    taskDone: '🧭 Zamknięte: {task} · podpowiedzi {n}/4 · {min} min',
+    taskDone: '🧭 Zamknięte: {task} · podpowiedzi {n}/4 · {min} min pracy',
     noTask: '🧭 Brak otwartego zadania w tym repo.',
     bashAsk: 'Mentor: ta komenda wygląda na zapis do plików. Zgódź się tylko, jeśli to Twoja decyzja.',
   },
@@ -67,19 +77,22 @@ const MESSAGES = {
       '🧭 Mentor: your attempt first. {why}\n' +
       'The request for ready-made code was not sent to Claude. You can:\n' +
       '  • /mentor:hint — take the next hint level\n' +
+      '  • /mentor:try <hypothesis> — describe your own diagnosis or idea (no file edits needed)\n' +
       '  • write even a rough draft in the code, then ask for a review\n' +
       '  • /mentor:off <reason> — pause for {min} min (shows up in the weekly review)',
     whyTask: 'Nothing in the repo has changed since task "{task}" started.',
     whyClean: 'The repo has no changes at all.',
     offNeedsReason: '🧭 Mentor: give a reason for the pause, e.g. /mentor:off urgent hotfix. It shows up in the weekly review.',
     taskNeedsTitle: '🧭 Mentor: name the task, e.g. /mentor:task form validation.',
-    paused: '🧭 Mentor paused until {time}. Reason: {reason}',
+    tryNeedsText: '🧭 Mentor: describe your attempt or hypothesis in at least one full sentence, e.g. /mentor:try I suspect the subscription is not renewed after the route changes.',
+    tryAccepted: '🧭 Attempt recorded. The gate for "{task}" is open.',
+    paused: '🧭 Mentor paused in this repo until {time}. Reason: {reason}',
     resumed: '🧭 Mentor is active again.',
     alreadyActive: '🧭 Mentor was already active.',
     taskStarted: '🧭 Task: {task}. Hints start from zero.',
     hintLevel: '🧭 Hint {n}/4 · {name}',
     hintMax: '🧭 Hint 4/4 · sketch (the ladder ends here)',
-    taskDone: '🧭 Closed: {task} · hints {n}/4 · {min} min',
+    taskDone: '🧭 Closed: {task} · hints {n}/4 · {min} min of work',
     noTask: '🧭 No open task in this repo.',
     bashAsk: 'Mentor: this command looks like it writes files. Allow it only if it is your call.',
   },
@@ -99,6 +112,18 @@ function config() {
     bashGuard: !/^(false|0|no|off)$/i.test(String(option('bash_guard', 'true'))),
     gateRegex: option('gate_regex', ''),
   };
+}
+
+// The user's own pattern is compiled without the `u` flag, so plain regexes keep working.
+function gate(cfg) {
+  if (cfg.gateRegex) {
+    try {
+      return new RegExp(cfg.gateRegex, 'i');
+    } catch (err) {
+      logError('gate_regex', err);
+    }
+  }
+  return new RegExp(DEFAULT_GATE, 'iu');
 }
 
 function t(cfg, key, vars = {}) {
@@ -121,12 +146,13 @@ function ensureDir() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
+// Pauses and tasks are both kept per project. A global `pause` from 0.1 is dropped.
 function loadState() {
   try {
     const s = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    return { pause: s.pause || null, tasks: s.tasks || {} };
+    return { pauses: s.pauses || {}, tasks: s.tasks || {} };
   } catch {
-    return { pause: null, tasks: {} };
+    return { pauses: {}, tasks: {} };
   }
 }
 
@@ -160,26 +186,39 @@ function logError(where, err) {
   }
 }
 
-// Ends an expired pause. Returns true when the state changed.
-function expirePause(state, dir) {
-  if (state.pause && Date.now() >= state.pause.until) {
-    logEvent(dir, 'resume', { auto: true });
-    state.pause = null;
-    return true;
-  }
-  return false;
+function isPaused(state, key) {
+  const pause = state.pauses[key];
+  return Boolean(pause && Date.now() < pause.until);
 }
 
-function isPaused(state) {
-  return Boolean(state.pause && Date.now() < state.pause.until);
+// Ends an expired pause of this project. Returns true when the state changed.
+function expirePause(state, dir, key) {
+  const pause = state.pauses[key];
+  if (!pause || Date.now() < pause.until) return false;
+  logEvent(dir, 'resume', { auto: true });
+  const task = state.tasks[key];
+  if (task) task.lastActiveAt = Math.max(task.lastActiveAt || task.startedAt, pause.until);
+  delete state.pauses[key];
+  return true;
+}
+
+// Adds the time since the last interaction to the task's work time, capped at IDLE_MS
+// so a task left open overnight does not count the night. Paused time is not counted.
+function touchTask(task, paused, now = Date.now()) {
+  const last = task.lastActiveAt || task.startedAt;
+  if (!paused) task.activeMs = (task.activeMs || 0) + Math.min(Math.max(0, now - last), IDLE_MS);
+  task.lastActiveAt = now;
 }
 
 function fmtTime(cfg, ms) {
   return new Date(ms).toLocaleTimeString(cfg.lang === 'pl' ? 'pl-PL' : 'en-GB', { hour: '2-digit', minute: '2-digit' });
 }
 
+// quotePath=false keeps non-ASCII file names readable instead of octal escapes.
 function git(dir, args) {
-  return execFileSync('git', args, { cwd: dir, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
+  return execFileSync('git', ['-c', 'core.quotePath=false', ...args], {
+    cwd: dir, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'],
+  });
 }
 
 function isGitRepo(dir) {
@@ -190,11 +229,21 @@ function isGitRepo(dir) {
   }
 }
 
-// Hash of everything the user could have changed: tracked diffs plus untracked files.
+function headCommit(dir) {
+  try {
+    return git(dir, ['rev-parse', 'HEAD']).trim();
+  } catch {
+    return null; // not a repo, or no commits yet
+  }
+}
+
+// Hash of everything the user could have changed: the current commit (so committing
+// work in progress still counts), tracked diffs and untracked files.
 // null when dir is not a git work tree.
 function fingerprint(dir) {
   if (!isGitRepo(dir)) return null;
   const hash = crypto.createHash('sha1');
+  hash.update(`HEAD:${headCommit(dir) || ''}\n`);
   const status = git(dir, ['status', '--porcelain=v1', '-uall']);
   hash.update(status);
   try {
@@ -220,10 +269,28 @@ function isDirty(dir) {
   return git(dir, ['status', '--porcelain=v1']).trim() !== '';
 }
 
+// `git status --short` plus the diff against the commit the task started from,
+// so work committed during the task is part of the review. null outside git.
+function changesSince(dir, head) {
+  if (!isGitRepo(dir)) return null;
+  const status = git(dir, ['status', '--short', '-uall']).trim();
+  let diff = '';
+  try {
+    diff = git(dir, ['diff', head || 'HEAD']);
+  } catch {
+    diff = git(dir, ['diff']);
+  }
+  if (diff.length > DIFF_LIMIT) {
+    diff = diff.slice(0, DIFF_LIMIT) + `\n[… diff truncated at ${DIFF_LIMIT} characters; run git diff ${head ? head.slice(0, 7) : 'HEAD'} for the rest]`;
+  }
+  return { status, diff: diff.trim() };
+}
+
 // One factual line about the current mode, injected into Claude's context.
 function statusLine(cfg, state, key) {
-  if (isPaused(state)) {
-    return `[mentor] PAUSED until ${fmtTime(cfg, state.pause.until)} (reason: ${state.pause.reason}). ` +
+  if (isPaused(state, key)) {
+    const pause = state.pauses[key];
+    return `[mentor] PAUSED in this project until ${fmtTime(cfg, pause.until)} (reason: ${pause.reason}). ` +
       'Mentor mode is off for now: normal assistant behaviour, file edits are allowed.';
   }
   const task = state.tasks[key];
@@ -261,14 +328,17 @@ function stats(days) {
   const byLevel = [0, 0, 0, 0, 0];
   for (const e of done) byLevel[Math.min(MAX_HINT, e.hint || 0)]++;
   const count = (type) => events.filter((e) => e.type === type).length;
+  const workMinutes = done.reduce((sum, d) => sum + (d.minutes || 0), 0);
   const lines = [
     `[mentor] Stats for the last ${days} days (from ${EVENTS_FILE}):`,
-    `- tasks started: ${count('task_start')}, closed: ${done.length}`,
+    `- tasks started: ${count('task_start')}, closed: ${done.length}, work time on closed tasks: ${workMinutes} min`,
     `- closed tasks by highest hint level: ` +
       byLevel.map((n, i) => `${i} ${LEVELS.en[i]}: ${n}`).join(', '),
     `- hints requested: ${count('hint')}`,
+    `- attempts described with /mentor:try: ${count('try')}`,
     `- "ready-made code" prompts stopped by the gate: ${count('gate_block')}`,
     `- file edits blocked: ${count('edit_block')}`,
+    `- what's-new checks: ${count('whats_new')}`,
     `- pauses (/mentor:off): ${pauses.length}`,
   ];
   for (const p of pauses) lines.push(`  - ${p.ts.slice(0, 16).replace('T', ' ')} [${p.project}] ${p.reason}`);
@@ -301,7 +371,8 @@ function blockPrompt(message) {
 }
 
 module.exports = {
-  DATA_DIR, EVENTS_FILE, LEARNING_FILE, MAX_HINT, LEVELS, LEVEL_SCOPE, DEFAULT_GATE,
-  config, t, levelName, readInput, loadState, saveState, projectDir, projectKey, logEvent, logError,
-  expirePause, isPaused, fmtTime, fingerprint, isDirty, statusLine, stats, appendLearning, respond, blockPrompt,
+  DATA_DIR, EVENTS_FILE, LEARNING_FILE, MAX_HINT, IDLE_MS, LEVELS, LEVEL_SCOPE, DEFAULT_GATE,
+  config, gate, t, levelName, readInput, loadState, saveState, projectDir, projectKey, logEvent, logError,
+  isPaused, expirePause, touchTask, fmtTime, headCommit, fingerprint, isDirty, changesSince, statusLine, stats,
+  appendLearning, respond, blockPrompt,
 };

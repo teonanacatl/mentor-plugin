@@ -16,8 +16,9 @@ itself, so the rules hold without anyone's good will.
 | Shell guard | Shell commands that look like they write files (`>`, `sed -i`, `Set-Content`, `git apply`, `ng g`, `--fix`…) trigger a permission prompt. Best effort. | `PreToolUse` hook |
 | Try-first gate | A prompt asking for ready-made code ("napisz…", "write the code…", "fix it") does not reach Claude while the repo shows no attempt of yours. | `UserPromptSubmit` hook |
 | Hint ladder | `/mentor:hint` climbs direction → concept → API → sketch, one level per call. The level lives in a state file and goes into context with every prompt. | hook + state file |
-| Exit with a cost | `/mentor:off <reason>` lifts everything for 30 min. No reason, no pause. Every pause is logged. | hook |
-| Weekly review | `/mentor:review-week` sums up the log: tasks done alone, hint levels, gate stops, pauses and their reasons, then quizzes you on the week's topics. | events log |
+| Exit with a cost | `/mentor:off <reason>` lifts everything in this project for 30 min. No reason, no pause. Every pause is logged. | hook |
+| Review with your diff | `/mentor:done` hands Claude `git status` and the diff since the task started (commits included), so the senior-style review comes in the first answer. | hook |
+| Weekly review | `/mentor:review-week` sums up the log: tasks done alone, work time, hint levels, gate stops, pauses and their reasons, then quizzes you on topics you have not mastered yet (`- [ ] repeat:` items in the journal, ticked off when you get them right). | events log + journal |
 | What's new | `/mentor:whats-new` compares the versions in your manifests with the latest releases and turns the changes into exercises on your own code. | skill |
 
 ## Install
@@ -52,6 +53,7 @@ a domain you want to own) and normal mode for routine work you already know. Tur
 | --- | --- |
 | `/mentor:task <title>` | Start a task: hint level 0, snapshot of the repo state |
 | `/mentor:hint [where I'm stuck]` | Next hint level |
+| `/mentor:try <what I checked / suspect>` | Describe your own attempt or hypothesis; counts as an attempt for the gate without editing files (debugging, reading unfamiliar code) |
 | `/mentor:done [what I learned]` | Close the task, get a senior-style review, write the journal |
 | `/mentor:off <reason>` | Pause for `off_minutes` (default 30) |
 | `/mentor:on` | End the pause early |
@@ -65,10 +67,25 @@ it cannot pause mentor mode for itself.
 
 ### How the gate decides that you tried
 
-- With an open task: something in the repo changed since `/mentor:task` (tracked diffs and
-  untracked files). Changes that were there before the task do not count.
+- With an open task: something in the repo changed since `/mentor:task`: tracked diffs,
+  untracked files or a new commit, so committing work in progress still counts. Changes that
+  were there before the task do not count.
+- A task opened implicitly by `/mentor:hint` or `/mentor:try` on a dirty repo counts the work
+  you had already done.
+- `/mentor:try <hypothesis>` opens the gate for the task without any file change. It is an
+  explicit, logged command on purpose: guessing "I checked… I suspect…" from the wording of
+  a prompt would turn the gate into a keyword game and make escapes invisible.
 - Without a task: the working tree is not clean.
 - Outside a git repository the gate stays open.
+
+The built-in pattern knows Polish word boundaries, so the first person ("napiszę", "poprawię")
+passes and only the imperative ("napisz", "popraw") is stopped.
+
+### Work time
+
+`/mentor:done` reports work time, not the time the task was open: each gap between your
+prompts counts at most 60 minutes, and paused time does not count. A task left open overnight
+adds an hour, not the night.
 
 ## Configuration
 
@@ -86,9 +103,9 @@ Asked when you enable the plugin, editable in `/config`:
 
 Everything stays on your machine, in `~/.claude/plugins/data/mentor-…/`:
 
-- `state.json`: pause and open tasks per project
-- `events.jsonl`: the log (task start/end, hints, gate stops with the first 120 characters of the
-  prompt, blocked edits, pauses with reasons)
+- `state.json`: pauses and open tasks, both per project
+- `events.jsonl`: the log (task start/end with work time, hints, `/mentor:try` texts, gate stops
+  with the first 120 characters of the prompt, blocked edits, pauses with reasons, what's-new checks)
 - `LEARNING.md`: the learning journal written by `/mentor:done`, the quiz and `whats-new`
 
 Uninstalling the plugin deletes this directory unless you pass `--keep-data`.
@@ -101,8 +118,10 @@ project: architecture, conventions and the areas you want to learn go into the r
 it never ships it.
 
 Check `/status` first: if your organisation sets `allowManagedHooksOnly`, plugin hooks do not run
-and only the output style is left. Then add `"permissions": { "deny": ["Edit", "Write"] }` to
-`.claude/settings.local.json` as the hard block.
+and only the output style and the skills are left. Then add
+`"permissions": { "deny": ["Edit", "Write"] }` to `.claude/settings.local.json` as the hard block.
+The hint ladder keeps working without the hook: `/mentor:hint` reads the last `Hint N/4` header
+from the conversation and goes one level up, or takes the level you give (`/mentor:hint 3 …`).
 
 ## Honest limits
 
@@ -116,6 +135,8 @@ and only the output style is left. Then add `"permissions": { "deny": ["Edit", "
 - **You will be slower.** That is the price of learning, not a bug.
 
 ## Development
+
+CI runs the hook tests on Linux, macOS and Windows with Node 20 and 22.
 
 ```
 node --test tests/

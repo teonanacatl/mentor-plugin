@@ -23,5 +23,15 @@ in this repository.
 Start the reply with `Hint N/4 · <level>` (in the user's language). Keep it under about ten
 lines. End with one question that checks understanding or nudges the next step.
 
-If the context has no `[mentor]` line with a hint level (for example the command was typed
-without the `mentor:` prefix), say that the counter did not move and give a level 1 hint.
+## Without the hook
+
+If the context has no `[mentor]` line with a hint level, the counter did not move: the command
+was typed without the `mentor:` prefix, or the organisation allows only managed hooks
+(`allowManagedHooksOnly`). Keep the ladder going from the conversation instead:
+
+1. If the arguments start with a number from 1 to 4 (`/mentor:hint 2 …`), use that level.
+2. Otherwise find your most recent `Hint N/4` or `Podpowiedź N/4` header in this conversation
+   and use N+1, at most 4.
+3. With neither, use level 1.
+
+Say in one short line that the level comes from the conversation, not from the hook.
