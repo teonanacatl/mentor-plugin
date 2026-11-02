@@ -3,6 +3,7 @@
 // before shell commands that look like they write files, and never lets Claude change
 // mentor's own state, Claude Code's settings or installed plugins.
 
+const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const lib = require('./lib');
@@ -10,8 +11,23 @@ const lib = require('./lib');
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell']);
 
-const norm = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
 const configDir = () => path.resolve(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'));
+
+// The canonical spelling of a path that may not exist yet: symlinks resolved (/var → /private/var
+// on macOS) and Windows short names expanded (RUNNER~1), so two spellings of one place compare equal.
+function real(p) {
+  try {
+    return fs.realpathSync.native(p);
+  } catch {
+    const parent = path.dirname(p);
+    return parent === p ? p : path.join(real(parent), path.basename(p));
+  }
+}
+
+const norm = (p) => {
+  const r = real(path.resolve(p));
+  return process.platform === 'win32' ? r.toLowerCase() : r;
+};
 
 // Path of `target` below `root`, as segments, or null when it is not inside.
 function inside(root, target) {
@@ -79,7 +95,7 @@ const PLUGIN_CLI = /\bclaude\s+plugins?\s+(disable|uninstall|remove|rm|marketpla
 function isTamper(command) {
   const cmd = String(command || '');
   if (PLUGIN_CLI.test(cmd)) return true;
-  const slashes = (s) => norm(s).replace(/\\/g, '/');
+  const slashes = (s) => (process.platform === 'win32' ? s.toLowerCase() : s).replace(/\\/g, '/');
   const touches = PROTECTED_IN_SHELL.some((re) => re.test(cmd)) || slashes(cmd).includes(slashes(lib.DATA_DIR));
   return touches && looksLikeWrite(cmd);
 }
@@ -129,7 +145,7 @@ function main() {
   const tool = String(input.tool_name || '');
   const toolInput = input.tool_input || {};
   const cwd = input.cwd || proj.dir;
-  const rel = (p) => path.relative(proj.dir, path.resolve(cwd, p));
+  const rel = (p) => path.relative(real(proj.dir), real(path.resolve(cwd, p)));
   const isMcp = tool.startsWith('mcp__');
   const editFile = EDIT_TOOLS.has(tool) ? toolInput.file_path || toolInput.notebook_path || '' : '';
   const mcpTargets = isMcp ? mcpWriteTargets(tool, toolInput) : [];
