@@ -9,6 +9,6 @@
     "eval": "node scripts/run-evals.js --allow-tools Edit Write --json plugins/mentor/evals/results/last.json",
     "eval:free": "node scripts/run-evals.js --case gate-stops-an-order --runs 1 --ablation none",
     "eval:ablation": "node scripts/run-evals.js --variant all --runs 5 --allow-tools Edit Write",
-    "eval:compare": "node scripts/run-evals.js --compare"
+    "eval:compare": "node scripts/run-evals.js --compare --save"
   }
 }

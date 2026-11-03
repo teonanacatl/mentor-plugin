@@ -1076,7 +1076,7 @@ test('explain mode: per task only, its code counted apart and kept out of the tr
   const review = ctx(s.prompt('/mentor:review-week'));
   assert.match(review, /closed tasks by highest hint level \(without work from pauses\): 0 none: 0/);
   assert.match(review, /closed with explain mode.*: 2 \("parser nagłówków" 40 lines, "drugi parser" 10 lines\)/);
-  assert.match(review, /no tasks with topics yet/, 'explain tasks stay out of the skill trend');
+  assert.match(review, /parsing: 0 \(3\/43 lines yours\)(;|\n)/, 'the mixed task stays with its share; the all-Claude one leaves');
   assert.strictEqual(s.state().mode, 'practice', 'the next task does not start in explain');
 });
 
@@ -1192,4 +1192,59 @@ test('a checkpoint without AI is timed and recorded per topic', () => {
   assert.match(fs.readFileSync(path.join(s.data, 'LEARNING.md'), 'utf8'), /## Checkpoint rxjs .*\n- result: 2\/3 in 25 min, without AI/);
   assert.match(ctx(s.prompt('/mentor:checkpoint rxjs')), /Earlier checkpoints on it: .* 2\/3 in 25 min/);
   assert.match(ctx(s.prompt('/mentor:review-week')), /checkpoints without AI \(the cleanest measure[^)]*\): rxjs: \d{4}-\d\d-\d\d 2\/3 in 25 min/);
+});
+
+// --- 0.7.2 ---
+
+test('a task that used explain stays in the trend with the user\'s share of the lines', () => {
+  const s = setup();
+  // 1. Explain switched on and off without Claude writing anything: counted normally.
+  s.prompt('/mentor:task parser 1 #parsing');
+  s.append('a.js', lines(30, 'mine'));
+  s.prompt('/mentor:mode explain');
+  s.prompt('/mentor:mode practice');
+  s.prompt('/mentor:hint');
+  s.prompt('/mentor:done');
+  // 2. 30 lines of the user's and 5 by Claude in explain mode: in the trend with the share.
+  s.prompt('/mentor:task parser 2 #parsing');
+  s.append('b.js', lines(30, 'mine too'));
+  s.prompt('/mentor:mode explain');
+  s.append('c.js', lines(5, 'claude'));
+  s.prompt('/mentor:mode practice');
+  s.prompt('/mentor:done');
+  // 3. Everything by Claude: left out of the trend.
+  s.prompt('/mentor:task parser 3 #parsing --mode explain');
+  s.append('d.js', lines(10, 'all claude'));
+  s.prompt('/mentor:done');
+  const review = ctx(s.prompt('/mentor:review-week'));
+  assert.match(review, /parsing: 1 → 0 \(30\/35 lines yours\)(;|\n)/);
+  assert.match(review, /closed tasks by highest hint level \(without work from pauses\): 0 none: 0, 1 direction: 1/,
+    'only the task without Claude\'s code counts as the user\'s own');
+  assert.match(review, /closed with explain mode.*: 2 \("parser 2" 5 lines, "parser 3" 10 lines\)/);
+});
+
+test('the checkpoint time ends at the last long prompt, so a long question does not stop it early', () => {
+  const s = setup();
+  s.prompt('/mentor:checkpoint rxjs');
+  const st = s.state();
+  st.checkpoint.startedAt -= 40 * 60000;
+  s.writeState(st);
+  s.prompt('W zadaniu 2: czy „strumień zakończony” oznacza complete, czy też error? Pytam, bo od tego zależy, czy liczyć wartość z catchError jako ostatnią.');
+  const s2 = s.state();
+  s2.checkpoint.answeredAt -= 30 * 60000; // the question came early
+  s.writeState(s2);
+  s.prompt('Odpowiedzi: 1) switchMap anuluje poprzedni strumień, 2) complete i error kończą oba, 3) wynik to [1,2,3], bo concatMap czeka na każdy z nich.');
+  const done = s.prompt('/mentor:checkpoint done 2/3');
+  assert.match(done.json.systemMessage, /2\/3 w 40 min.*Inny czas\?/);
+});
+
+test('Polish word order and phrasing in the title signals', () => {
+  const s = setup();
+  for (const t of ['Aplikacja się wysypuje przy starcie', 'Wysypuje się po zalogowaniu', 'Błąd przy zapisie formularza',
+    'Logowanie nie działa', 'Ekran się zawiesza']) {
+    s.prompt(`/mentor:task ${t}`);
+    assert.strictEqual(s.state().task.mode, 'debug', `debug: ${t}`);
+  }
+  s.prompt('/mentor:task Obsługa błędów formularza');
+  assert.strictEqual(s.state().task.mode, 'practice');
 });

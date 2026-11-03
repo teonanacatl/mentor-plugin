@@ -26,7 +26,7 @@ part you chose to write yours.
 | Self-protection | Claude cannot change mentor's state, Claude Code's settings files or installed plugins, nor run anything stored under `~/.claude`, by any tool, not even during a pause. A shell command that touches those places passes only as a plain read (`cat`, `ls`, `grep`, `jq`…). | `PreToolUse` hook |
 | Shell guard | Commands that look like they write files (`>`, `sed -i`, `Set-Content`, `git checkout`, `git pull`, formatters such as `prettier -w` or `cargo fmt`, `ng g`, `--fix`…), in the shell or through an MCP tool that runs commands, trigger a permission prompt, or are denied. Best effort. | `PreToolUse` hook |
 | Try-first gate | A prompt asking for ready-made code ("napisz…", "dokończ…", "write the code…", "fix it") does not reach Claude until you have changed some lines of code yourself. | `UserPromptSubmit` hook |
-| Kinds of work | `practice` (you solve it), `guided` (Claude leads in small steps), `debug` (hypothesis → experiment → analysis; the gate opens with a hypothesis or your own experiment in the code), `read` (understanding existing code, no gate), `explain` (for one task only: Claude writes the code with its explanation and a check question after each piece, the study's generation-then-comprehension pattern; the code it writes is counted apart, like work from a pause, and the task stays out of the skill trend), `normal <reason>` (mentor off until you switch back, logged like a pause). Read from the task title on strong signals only ("bug: …", "nie działa", "regression" → debug; "how does … work" → read) unless you set it with `--mode` or `/mentor:mode`. | hook + style |
+| Kinds of work | `practice` (you solve it), `guided` (Claude leads in small steps), `debug` (hypothesis → experiment → analysis; the gate opens with a hypothesis or your own experiment in the code), `read` (understanding existing code, no gate), `explain` (for one task only: Claude writes the code with its explanation and a check question after each piece, the study's generation-then-comprehension pattern; the code it writes is counted apart, like work from a pause: the task stays in the skill trend with your share of the lines, e.g. `1 (30/35 lines yours)`, and leaves it only when Claude wrote all of it), `normal <reason>` (mentor off until you switch back, logged like a pause). Read from the task title on strong signals only ("bug: …", "nie działa", "regression" → debug; "how does … work" → read) unless you set it with `--mode` or `/mentor:mode`. | hook + style |
 | Hint ladder | `/mentor:hint` climbs direction → concept → API → sketch, one level per call; `/mentor:hint 3` sets a level, `/mentor:hint reset` starts over. Levels are cumulative. The level lives in a state file and goes into context with every prompt. | hook + state file |
 | Exit with a cost | `/mentor:off <reason>` lifts the blocks in this project for 30 min. No reason, no pause; from the third pause of a day the reason has to be longer. Every pause is logged. | hook |
 | Review with your diff | `/mentor:done` hands Claude the files you changed during the task, new files with their content, so the senior-style review comes in the first answer. | hook |
@@ -222,6 +222,10 @@ it can answer is which part of the plugin produces the behaviour. `npm run eval:
 the same cases against two cut-down copies, the output style and skills alone, and the same plus
 only the Edit/Write block, and prints them next to the full plugin (`npm run eval:compare`).
 
+The raw results are git-ignored; the table behind these numbers, with the Claude Code version,
+runs and cost, is committed in [`plugins/mentor/evals/SUMMARY.md`](plugins/mentor/evals/SUMMARY.md)
+(`npm run eval:compare` rewrites it from the last runs).
+
 Ablation (0.7.1, 5 runs per case; mean, with the range over runs where it varies):
 
 | Case | Full plugin | Style + edit block | Style only | No plugin |
@@ -300,6 +304,10 @@ from the conversation and goes one level up, or takes the level you give (`/ment
 
 ## Honest limits
 
+- **Features are frozen until real use.** Everything here was checked on synthetic scenarios and
+  evals, none of it in four weeks of real work. Next comes the protocol in "Your own test"; after
+  it, whatever the events log shows was never used goes, and the next version should be smaller
+  rather than bigger.
 - **Enforcement is frozen.** The opponent is not Claude, which follows the style; it is you at
   17:45, and you always have `/mentor:off` and `/plugin disable`. So no new heuristics for
   hypothetical escapes: a new rule only for an escape seen in real use (`events.jsonl`). The

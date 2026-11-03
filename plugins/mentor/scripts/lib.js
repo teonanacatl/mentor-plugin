@@ -173,8 +173,8 @@ const MESSAGES = {
     explainEnded: ' Explain zakończony: {lines} linii Claude\'a, nie liczę ich jako Twoje.',
     checkpointExpired: '🧭 Sprawdzian „{topic}” wygasł po {hours} h bez wyniku; zapisany jako niedokończony.',
     checkpointUsage: '🧭 /mentor:checkpoint <temat> zaczyna sprawdzian bez AI, /mentor:checkpoint done <rozwiązane>/<wszystkie> go kończy.',
-    checkpointStarted: '🧭 Sprawdzian bez AI: {topic}. Claude da zadania i nie będzie podpowiadał. Koniec: /mentor:checkpoint done N/M.',
-    checkpointDone: '🧭 Sprawdzian {topic}: {solved}/{total} w {min} min, zapisany.',
+    checkpointStarted: '🧭 Sprawdzian bez AI: {topic}. Claude da zadania i nie będzie podpowiadał. Koniec: /mentor:checkpoint done N/M [minuty] — czas liczę do wklejenia odpowiedzi, chyba że podasz własny.',
+    checkpointDone: '🧭 Sprawdzian {topic}: {solved}/{total} w {min} min, zapisany. Inny czas? /mentor:checkpoint done {solved}/{total} <minuty> przy następnym.',
     checkpointNone: '🧭 Nie trwa żaden sprawdzian. Zacznij: /mentor:checkpoint <temat>.',
     modeNormal: '🧭 Tryb normalny w tym repo, bez limitu czasu. Powód: {reason}. Powrót: /mentor:on albo /mentor:mode practice.',
     modeNeedsReason: '🧭 Mentor: tryb normalny też wymaga powodu, np. /mentor:mode normal rutynowa migracja.',
@@ -232,8 +232,8 @@ const MESSAGES = {
     explainEnded: ' Explain ended: {lines} lines by Claude, not counted as yours.',
     checkpointExpired: '🧭 Checkpoint "{topic}" expired after {hours} h without a result; recorded as unfinished.',
     checkpointUsage: '🧭 /mentor:checkpoint <topic> starts a test without AI, /mentor:checkpoint done <solved>/<total> ends it.',
-    checkpointStarted: '🧭 Checkpoint without AI: {topic}. Claude gives the exercises and no hints. End: /mentor:checkpoint done N/M.',
-    checkpointDone: '🧭 Checkpoint {topic}: {solved}/{total} in {min} min, recorded.',
+    checkpointStarted: '🧭 Checkpoint without AI: {topic}. Claude gives the exercises and no hints. End: /mentor:checkpoint done N/M [minutes] — timed until you paste the answers, unless you give your own time.',
+    checkpointDone: '🧭 Checkpoint {topic}: {solved}/{total} in {min} min, recorded. Different time? Give it next time: /mentor:checkpoint done {solved}/{total} <minutes>.',
     checkpointNone: '🧭 No checkpoint in progress. Start one: /mentor:checkpoint <topic>.',
     modeNormal: '🧭 Normal mode in this repo, no time limit. Reason: {reason}. Back: /mentor:on or /mentor:mode practice.',
     modeNeedsReason: '🧭 Mentor: normal mode needs a reason too, e.g. /mentor:mode normal routine migration.',
@@ -459,7 +459,8 @@ function inferMode(title) {
   const t = String(title || '').trim();
   const W = '(?![\\p{L}])';
   if (new RegExp(`^(bug|bugfix|b[lł][aą]d|fix)${W}\\s*[:#-]|(^|[^\\p{L}])(bug|bugfix|nie dzia[lł]a|regresj\\p{L}*|regression|` +
-    `zawiesza si[eę]|wysypuje si[eę]|fix the crash|crash(es|ing)? (on|when|after|in))${W}`, 'iu').test(t)) return 'debug';
+    `(zawiesza|wysypuje|sypie|crashuje) si[eę]|si[eę] (zawiesza|wysypuje|sypie|crashuje)|` +
+    `b[lł][aą]d (przy|w|podczas|po)|fix the crash|crash(es|ing)? (on|when|after|in))${W}`, 'iu').test(t)) return 'debug';
   if (/(^|[^\p{L}])(zrozumie[cć]|zrozum|understand|jak dzia[lł]a|how does|przeczytaj|poznaj|explore|onboarding)(?![\p{L}])/iu.test(t)) return 'read';
   return null;
 }
@@ -1137,11 +1138,24 @@ function skillLines() {
     ? Object.entries(byCp).map(([t, xs]) => `${t}: ${xs.map((c) => `${c.ts.slice(0, 10)} ${c.solved}/${c.total} in ${c.minutes} min`).join(' → ')}`).join('; ')
     : 'none yet (/mentor:checkpoint <topic>)'}`);
   // The help trend second: it also moves with how hard the tasks were, and the user picks hint levels.
-  const share = (e) => (e.scopeLines !== undefined ? ` (${e.scopeLines}/${e.scopeLines + e.otherLines} lines yours)` : '');
+  // The user's share of the changed lines, when part of them was not theirs: outside the scope,
+  // or written by Claude in explain mode. A task with explain stays in the trend with its share;
+  // only one where Claude wrote everything leaves it.
+  const own = (e) => {
+    const total = e.totalLines !== undefined ? e.totalLines : (e.scopeLines || 0) + (e.otherLines || 0);
+    let mine = e.scopeLines !== undefined ? e.scopeLines : total;
+    if (e.explainWork > 0) mine = Math.min(mine, Math.max(0, total - e.explainWork));
+    return { mine, total };
+  };
+  const share = (e) => {
+    if (e.scopeLines === undefined && !(e.explainWork > 0)) return '';
+    const { mine, total } = own(e);
+    return ` (${mine}/${total} lines yours)`;
+  };
   const mark = (e) => `${e.hint || 0}${e.pausedWork > 0 ? '*' : ''}${share(e)}`;
   const byTopic = {};
   for (const d of done) {
-    if (d.mode === 'explain' || d.explainUsed) continue;
+    if (d.explainWork > 0 && own(d).mine === 0) continue;
     for (const t of d.topics || []) (byTopic[t] = byTopic[t] || []).push(d);
   }
   const topics = Object.keys(byTopic).sort();
@@ -1177,8 +1191,10 @@ function stats(days) {
   // A task with code from a pause is not counted at any hint level: part of it may be Claude's.
   // Explain-mode tasks are not either: there Claude writes the code on purpose.
   const withPause = done.filter((e) => e.pausedWork > 0);
-  const counts = (e) => !(e.pausedWork > 0) && e.mode !== 'explain' && !e.explainUsed;
-  const explained = done.filter((e) => e.mode === 'explain' || e.explainUsed);
+  // Hint levels count only tasks the user did without code from a pause or from explain mode;
+  // explain switched on and off without Claude writing anything does not matter.
+  const counts = (e) => !(e.pausedWork > 0) && !(e.explainWork > 0);
+  const explained = done.filter((e) => e.explainWork > 0);
   const byLevel = [0, 0, 0, 0, 0];
   for (const e of done) if (counts(e)) byLevel[Math.min(MAX_HINT, e.hint || 0)]++;
   const count = (type) => events.filter((e) => e.type === type).length;

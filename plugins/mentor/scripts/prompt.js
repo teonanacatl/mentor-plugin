@@ -159,6 +159,7 @@ function handleCommand(ctx, name, args) {
         ...(task.explainUsed ? { explainUsed: true, explainWork } : {}),
         ...(task.topics ? { topics: task.topics } : {}), ...(task.scope ? { scope: task.scope } : {}),
         ...(split ? { scopeLines: split.mine, otherLines: split.other } : {}),
+        ...(review ? { totalLines: review.scopeSplit.mine + review.scopeSplit.other } : {}),
         ...(task.transfer ? { transfer: true } : {}),
       });
       lib.appendLearning(
@@ -385,8 +386,9 @@ function main() {
   if (lib.expireCheckpoint(proj, state, now)) {
     changed = true;
     ctx.notice = lib.t(cfg, 'checkpointExpired', { topic: expiredCheckpoint, hours: 2 });
-  } else if (state.checkpoint && !state.checkpoint.answeredAt && prompt.length >= 120 && !prompt.startsWith('/')) {
-    // A long prompt during a checkpoint is most likely the pasted answers: solving ends here.
+  } else if (state.checkpoint && prompt.length >= 120 && !prompt.startsWith('/')) {
+    // The last long prompt before `done` is most likely the pasted answers: solving ended there.
+    // (A long clarifying question earlier is overwritten by it.)
     state.checkpoint.answeredAt = now;
     changed = true;
   }

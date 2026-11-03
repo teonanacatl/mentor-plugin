@@ -1,7 +1,7 @@
 {
   "name": "mentor",
   "displayName": "Mentor",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Mentor mode: Claude points the way instead of writing your code. Blocks file edits, gates requests for ready-made code until you have tried, escalates hints step by step and reviews your week.",
   "author": {
     "name": "Przemysław Lewalski"

@@ -91,9 +91,30 @@ function compare() {
   console.log(['case'.padEnd(30), ...cols.map((c) => c.padStart(W))].join(''));
   for (const n of names) console.log([n.padEnd(30), ...cols.map((c) => cell(runs(loaded[c], n)).padStart(W))].join(''));
   console.log(['suite (all runs)'.padEnd(30), ...cols.map((c) => cell(names.flatMap((n) => runs(loaded[c], n))).padStart(W))].join(''));
+  if (save) saveSummary(loaded, names, cols, runs, cell);
+}
+
+// The raw results are git-ignored (large, with full transcripts); this small table is committed,
+// so the numbers in the README can be checked against the repo.
+function saveSummary(loaded, names, cols, runs, cell) {
+  const version = JSON.parse(fs.readFileSync(path.join(plugin, '.claude-plugin', 'plugin.json'), 'utf8')).version;
+  const meta = Object.entries(loaded).filter(([k]) => k !== 'no plugin').map(([k, r]) =>
+    `| ${k} | ${r.claudeVersion || '?'} | ${r.cases[0] ? (r.cases[0].arms.with || []).length : 0} | $${(r.costUsd || 0).toFixed(2)} |`);
+  const md = [
+    `# Eval results`, '',
+    `Plugin ${version}. Written by \`node scripts/run-evals.js --compare --save\` from the last runs in \`results/\`.`,
+    'Each cell: the mean score over runs, the range when it varies, and the number of runs.', '',
+    `| case | ${cols.join(' | ')} |`, `| --- | ${cols.map(() => '---').join(' | ')} |`,
+    ...names.map((n) => `| ${n} | ${cols.map((c) => cell(runs(loaded[c], n))).join(' | ')} |`),
+    `| **suite (all runs)** | ${cols.map((c) => cell(names.flatMap((n) => runs(loaded[c], n)))).join(' | ')} |`, '',
+    '| run | Claude Code | runs per case | cost |', '| --- | --- | --- | --- |', ...meta, '',
+  ].join('\n');
+  fs.writeFileSync(path.join(plugin, 'evals', 'SUMMARY.md'), md);
+  console.log('\nwrote plugins/mentor/evals/SUMMARY.md');
 }
 
 const argv = process.argv.slice(2);
+const save = argv.includes('--save');
 if (argv.includes('--compare')) {
   compare();
   process.exit(0);
