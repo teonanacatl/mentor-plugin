@@ -70,18 +70,27 @@ function compare() {
       // not run yet
     }
   }
+  // With the no-plugin baseline arm of the full run as its own column.
+  if (loaded.full && loaded.full.cases.some((c) => c.arms && c.arms.without)) loaded['no plugin'] = { ...loaded.full, arm: 'without' };
   const names = [...new Set(Object.values(loaded).flatMap((r) => r.cases.map((c) => c.name)))].sort();
   const cols = Object.keys(loaded);
-  const score = (r, n) => {
+  const runs = (r, n) => {
     const c = r.cases.find((x) => x.name === n);
-    return c ? c.aggregates.score.toFixed(2) : '  - ';
+    const arm = c && c.arms && c.arms[r.arm || 'with'];
+    return arm ? arm.map((x) => x.score) : [];
   };
-  console.log(['case'.padEnd(30), ...cols.map((c) => c.padStart(12))].join(''));
-  for (const n of names) console.log([n.padEnd(30), ...cols.map((c) => score(loaded[c], n).padStart(12))].join(''));
-  console.log(['suite'.padEnd(30), ...cols.map((c) => loaded[c].aggregates.overallScore.toFixed(2).padStart(12))].join(''));
-  if (loaded.full && loaded.full.aggregates.meanDelta !== undefined) {
-    console.log(`\nno plugin at all (baseline arm of the full run): ${(loaded.full.aggregates.overallScore - loaded.full.aggregates.meanDelta).toFixed(2)}`);
-  }
+  // Mean and the spread over runs, so one lucky or unlucky run is visible as such.
+  const cell = (xs) => {
+    if (!xs.length) return '-';
+    const mean = xs.reduce((a, b) => a + b, 0) / xs.length;
+    const lo = Math.min(...xs);
+    const hi = Math.max(...xs);
+    return lo === hi ? `${mean.toFixed(2)} (n=${xs.length})` : `${mean.toFixed(2)} [${lo.toFixed(2)}–${hi.toFixed(2)}] (n=${xs.length})`;
+  };
+  const W = 28;
+  console.log(['case'.padEnd(30), ...cols.map((c) => c.padStart(W))].join(''));
+  for (const n of names) console.log([n.padEnd(30), ...cols.map((c) => cell(runs(loaded[c], n)).padStart(W))].join(''));
+  console.log(['suite (all runs)'.padEnd(30), ...cols.map((c) => cell(names.flatMap((n) => runs(loaded[c], n))).padStart(W))].join(''));
 }
 
 const argv = process.argv.slice(2);

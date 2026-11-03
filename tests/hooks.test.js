@@ -914,7 +914,7 @@ test('the log keeps no user text by default; log_text keeps it; /mentor:forget c
   assert.match(s.prompt('/mentor:forget cokolwiek').json.systemMessage, /forget all/);
 });
 
-test('modes: read has no gate, debug opens only with a hypothesis, normal is a pause without an end', () => {
+test('modes: read has no gate, debug opens with a hypothesis or an experiment, normal is a pause without an end', () => {
   const s = setup();
   assert.match(ctx(s.prompt('co dalej?')), /mode practice:/);
   s.prompt('/mentor:mode read');
@@ -924,13 +924,15 @@ test('modes: read has no gate, debug opens only with a hypothesis, normal is a p
 
   s.prompt('/mentor:mode debug');
   s.prompt('/mentor:task strumień gubi zdarzenia');
-  s.append('app.js', lines(5, 'console.log probe'));
   const blocked = s.prompt('napraw to');
-  assert.strictEqual(blocked.code, 2, 'in debug mode lines alone do not open the gate');
-  assert.match(blocked.stderr, /hipoteza/);
+  assert.strictEqual(blocked.code, 2, 'nothing tried yet');
+  assert.match(blocked.stderr, /hipotezy/);
   s.prompt('/mentor:try podejrzewam, że subskrypcja jest zakładana dwa razy');
-  assert.strictEqual(s.prompt('napraw to').code, 0);
+  assert.strictEqual(s.prompt('napraw to').code, 0, 'a hypothesis opens it');
   assert.strictEqual(s.state().task.mode, 'debug');
+  s.prompt('/mentor:task drugi strumień też gubi');
+  s.append('app.js', lines(5, 'console.log probe'));
+  assert.strictEqual(s.prompt('napraw to').code, 0, 'so does an experiment in the code');
 
   assert.strictEqual(s.prompt('/mentor:mode normal').code, 2, 'normal needs a reason');
   assert.match(s.prompt('/mentor:mode normal rutynowa migracja konfiguracji').json.systemMessage, /bez limitu czasu/);
@@ -1048,16 +1050,100 @@ test('a learning scope: the user writes the --mine part, Claude may write the re
   assert.match(fs.readFileSync(path.join(s.data, 'LEARNING.md'), 'utf8'), /my part: src\/parser\/\*\*/);
 });
 
-test('explain mode: Claude writes code and checks understanding; not counted as solved alone', () => {
+test('explain mode: per task only, its code counted apart and kept out of the trend', () => {
   const s = setup();
+  assert.match(s.prompt('/mentor:mode explain').json.systemMessage, /dotyczy jednego zadania/, 'not for the whole repo');
+  assert.match(ctx(s.prompt('co dalej?')), /mode practice/);
+
+  s.prompt('/mentor:task parser nagłówków #parsing');
+  s.append('app.js', lines(3, 'mine first'));
   s.prompt('/mentor:mode explain');
   assert.match(ctx(s.prompt('co dalej?')), /mode explain: you may write code.*one question that checks/);
   assert.strictEqual(s.tool('Edit', { file_path: path.join(s.repo, 'app.js') }).stdout, '');
-  assert.strictEqual(s.prompt('napisz to').code, 0);
   assert.strictEqual(s.tool('Bash', { command: "sed -i 's/a/b/' app.js" }).stdout, '', 'no shell guard either');
-  s.prompt('/mentor:task wyjaśnij mi strumienie #rxjs');
-  assert.match(ctx(s.prompt('/mentor:done')), /In explain mode you wrote code on purpose/);
-  assert.match(ctx(s.prompt('/mentor:review-week')), /closed tasks by highest hint level \(without work from pauses\): 0 none: 0/);
+  s.append('parser.js', lines(40, 'written by Claude'));
+  const back = s.prompt('/mentor:mode practice');
+  assert.match(back.json.systemMessage, /Explain zakończony: 40 linii Claude'a/);
+  assert.strictEqual(s.prompt('napisz resztę').code, 2, 'Claude\'s 40 lines are not the user\'s attempt');
+  const done = s.prompt('/mentor:done');
+  assert.match(done.json.systemMessage, /40 linii z trybu explain/);
+  assert.match(ctx(done), /parser\.js .*\(written in explain mode: Claude's code\)/);
+  assert.match(ctx(done), /record the answers as `- check: ok\|miss <topic>`/);
+
+  s.prompt('/mentor:task drugi parser #parsing --mode explain');
+  s.append('second.js', lines(10, 'all Claude'));
+  s.prompt('/mentor:done');
+  const review = ctx(s.prompt('/mentor:review-week'));
+  assert.match(review, /closed tasks by highest hint level \(without work from pauses\): 0 none: 0/);
+  assert.match(review, /closed with explain mode.*: 2 \("parser nagłówków" 40 lines, "drugi parser" 10 lines\)/);
+  assert.match(review, /no tasks with topics yet/, 'explain tasks stay out of the skill trend');
+  assert.strictEqual(s.state().mode, 'practice', 'the next task does not start in explain');
+});
+
+test('comprehension checks recorded in the journal are summed per topic', () => {
+  const s = setup();
+  fs.mkdirSync(s.data, { recursive: true });
+  fs.writeFileSync(path.join(s.data, 'LEARNING.md'), '- check: ok rxjs\n- check: miss rxjs\n- check: ok rxjs\n- check: ok di\n');
+  assert.match(ctx(s.prompt('/mentor:review-week')), /understanding of code Claude wrote.*rxjs: 2 ok, 1 missed; di: 1 ok, 0 missed/);
+});
+
+test('0.7.1 details: typos in the scope, gitignore-style globs, scope share, title signals, numeric tags', () => {
+  const s = setup();
+  s.env.CLAUDE_PLUGIN_OPTION_FOCUS_TOPICS = 'Go, UI';
+  fs.mkdirSync(path.join(s.repo, 'src', 'parser'), { recursive: true });
+  s.append('src/parser/a.ts', 'x\n');
+  s.append('src/app.ts', 'x\n');
+  commit(s.repo, 'files');
+  const typo = s.prompt('/mentor:task parser --mine src/parsre/**');
+  assert.match(typo.json.systemMessage, /src\/parsre\/\*\* nie pasuje do żadnego pliku/);
+  assert.doesNotMatch(s.prompt('/mentor:task parser --mine src/parser/**').json.systemMessage, /nie pasuje/);
+
+  s.prompt('/mentor:task typy --mine *.ts');
+  assert.strictEqual(s.decision('Edit', { file_path: path.join(s.repo, 'src', 'app.ts') }), 'deny', '*.ts matches at any depth');
+
+  s.prompt('/mentor:task parser #parsing --mine src/parser/**');
+  s.append('src/parser/a.ts', 'mine();\nmine2();\n');
+  s.append('src/parser-impl.js', lines(120, 'claude helper'));
+  const done = s.prompt('/mentor:done');
+  assert.match(done.json.systemMessage, /w Twojej części 2 z 122 linii/);
+  assert.match(ctx(s.prompt('/mentor:review-week')), /parsing: 0 \(2\/122 lines yours\)/);
+
+  for (const t of ['Add error handling to the form', 'Exception handling middleware', 'Crash reporting integration',
+    'Why we need DI: refactor services', 'Obsługa błędów formularza']) {
+    s.prompt(`/mentor:task ${t}`);
+    assert.strictEqual(s.state().task.mode, 'practice', `not debug: ${t}`);
+  }
+  s.prompt('/mentor:task Fix #123 login redirect');
+  assert.strictEqual(s.state().task.title, 'Fix #123 login redirect');
+  assert.ok(!s.state().task.topics, '#123 is not a topic');
+  s.prompt('/mentor:task Algorithm for building trees');
+  assert.ok(!s.state().task.topics, '"Go" and "UI" only as whole words');
+  s.prompt('/mentor:task migracja na Go');
+  assert.deepStrictEqual(s.state().task.topics, ['go']);
+  assert.match(s.prompt('/mentor:task bez niczego').json.systemMessage, /pełniej: \/mentor:task bez niczego #<temat> --mine/);
+});
+
+test('a forgotten checkpoint expires and the task stays visible during one', () => {
+  const s = setup();
+  s.prompt('/mentor:task parser');
+  s.prompt('/mentor:checkpoint rxjs');
+  assert.match(ctx(s.prompt('co dalej?')), /CHECKPOINT in progress[\s\S]*task: "parser"/);
+  const st = s.state();
+  st.checkpoint.startedAt -= 3 * 3600000;
+  s.writeState(st);
+  const r = s.prompt('co dalej?');
+  assert.match(r.json.systemMessage, /wygasł po 2 h/);
+  assert.doesNotMatch(ctx(r), /CHECKPOINT/);
+  assert.ok(s.events().some((e) => e.type === 'checkpoint_expired'));
+
+  s.prompt('/mentor:checkpoint rxjs');
+  const st2 = s.state();
+  st2.checkpoint.startedAt -= 30 * 60000;
+  s.writeState(st2);
+  s.prompt('Odpowiedzi: 1) switchMap anuluje poprzedni strumień, 2) mergeMap nie, 3) wynik to [1,2,3], bo concatMap czeka na każdy.');
+  assert.match(s.prompt('/mentor:checkpoint done 2/3').json.systemMessage, /2\/3 w 30 min/, 'time until the answers were pasted');
+  s.prompt('/mentor:checkpoint rxjs');
+  assert.match(s.prompt('/mentor:checkpoint done 3/3 18').json.systemMessage, /3\/3 w 18 min/, 'or the time the user gives');
 });
 
 test('the kind of work is read from the task title unless given', () => {
@@ -1105,5 +1191,5 @@ test('a checkpoint without AI is timed and recorded per topic', () => {
   assert.match(s.prompt('/mentor:checkpoint done 2/3').json.systemMessage, /rxjs: 2\/3 w 25 min/);
   assert.match(fs.readFileSync(path.join(s.data, 'LEARNING.md'), 'utf8'), /## Checkpoint rxjs .*\n- result: 2\/3 in 25 min, without AI/);
   assert.match(ctx(s.prompt('/mentor:checkpoint rxjs')), /Earlier checkpoints on it: .* 2\/3 in 25 min/);
-  assert.match(ctx(s.prompt('/mentor:review-week')), /checkpoints without AI: rxjs: \d{4}-\d\d-\d\d 2\/3 in 25 min/);
+  assert.match(ctx(s.prompt('/mentor:review-week')), /checkpoints without AI \(the cleanest measure[^)]*\): rxjs: \d{4}-\d\d-\d\d 2\/3 in 25 min/);
 });

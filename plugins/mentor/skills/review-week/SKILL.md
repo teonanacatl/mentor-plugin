@@ -11,11 +11,17 @@ the statistics from the events log into the `[mentor] Stats` lines of this promp
 
 In the user's language, short and factual, no praise inflation and no guilt. **Start with the
 person, not the tool:**
-- the skill measures first, the ones no model judged: per topic, how much help each task needed
-  over time (for example `rxjs: 3 → 2 → 1` means the user needs less help), transfer exercises
-  done as real tasks and their hint level, and checkpoints without AI. Say which topics improve,
-  which do not, and where there is too little data to tell; suggest `#topic` tags or a
-  `/mentor:checkpoint` where a measure is missing;
+- the skill measures first, the ones no model judged, in this order of weight:
+  1. checkpoints without AI: same difficulty, no help, so the cleanest signal;
+  2. the help per topic, task by task (`rxjs: 3 → 2 → 1`). It also falls when tasks get easier,
+     and the user picks hint levels, so read it together with the checkpoints. Where it shows
+     `(2/122 lines yours)`, most of the change was Claude's: do not call that progress;
+  3. transfer exercises done as real tasks and their hint level;
+  4. understanding of code Claude wrote (`check` answers per topic).
+  Say which topics improve, which do not, and where there is too little data to tell; suggest
+  `#topic` tags or a `/mentor:checkpoint` where a measure is missing;
+- explain mode and pauses side by side: how often Claude wrote the code, in which tasks, and
+  whether the check answers show the user understood it;
 - how many tasks were closed, how much work time, and at which hint level they usually ended
   (level 0 means alone);
 - how many times the gate stopped a request for ready-made code, and how often the user

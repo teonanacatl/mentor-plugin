@@ -21,18 +21,19 @@ part you chose to write yours.
 | Layer | What it does | Enforced by |
 | --- | --- | --- |
 | Mentor output style | Claude asks, points to files, explains concepts, reviews your code; where it writes code, it explains it and asks a question that checks your understanding. Applied automatically while the plugin is enabled (`force-for-plugin`). | instruction |
-| Learning scope | `/mentor:task <title> --mine src/parser/**`: the part you write yourself. Claude may write everything outside it (and is asked to check your understanding of it); inside it, edits are blocked. Most of a real task is routine, so this removes most reasons to pause. | `PreToolUse` hook |
+| Learning scope | `/mentor:task <title> --mine src/parser/**`: the part you write yourself. Claude may write everything outside it (and is asked to check your understanding of it); inside it, edits are blocked. Most of a real task is routine, so this removes most reasons to pause. Globs follow `.gitignore` rules (`*.ts` at any depth, `src/x/**` from the root); a pattern that matches no file is flagged as a likely typo, and `/mentor:done` records how many changed lines were in your part. | `PreToolUse` hook |
 | Edit block | Without a scope: `Edit`, `Write`, `NotebookEdit` and file-writing MCP tools are denied in the project. Only Claude's plans and memory (as `.md`), todos (as `.json`) and the learning journal stay writable. | `PreToolUse` hook |
 | Self-protection | Claude cannot change mentor's state, Claude Code's settings files or installed plugins, nor run anything stored under `~/.claude`, by any tool, not even during a pause. A shell command that touches those places passes only as a plain read (`cat`, `ls`, `grep`, `jq`…). | `PreToolUse` hook |
 | Shell guard | Commands that look like they write files (`>`, `sed -i`, `Set-Content`, `git checkout`, `git pull`, formatters such as `prettier -w` or `cargo fmt`, `ng g`, `--fix`…), in the shell or through an MCP tool that runs commands, trigger a permission prompt, or are denied. Best effort. | `PreToolUse` hook |
 | Try-first gate | A prompt asking for ready-made code ("napisz…", "dokończ…", "write the code…", "fix it") does not reach Claude until you have changed some lines of code yourself. | `UserPromptSubmit` hook |
-| Kinds of work | `practice` (you solve it), `guided` (Claude leads in small steps), `debug` (hypothesis → experiment → analysis; the gate opens with a hypothesis), `read` (understanding existing code, no gate), `explain` (Claude writes the code with its explanation and a check question after each piece: the study's generation-then-comprehension pattern), `normal <reason>` (mentor off until you switch back, logged like a pause). Read from the task title (a bug → debug, "how does … work" → read) unless you set it with `--mode` or `/mentor:mode`. | hook + style |
+| Kinds of work | `practice` (you solve it), `guided` (Claude leads in small steps), `debug` (hypothesis → experiment → analysis; the gate opens with a hypothesis or your own experiment in the code), `read` (understanding existing code, no gate), `explain` (for one task only: Claude writes the code with its explanation and a check question after each piece, the study's generation-then-comprehension pattern; the code it writes is counted apart, like work from a pause, and the task stays out of the skill trend), `normal <reason>` (mentor off until you switch back, logged like a pause). Read from the task title on strong signals only ("bug: …", "nie działa", "regression" → debug; "how does … work" → read) unless you set it with `--mode` or `/mentor:mode`. | hook + style |
 | Hint ladder | `/mentor:hint` climbs direction → concept → API → sketch, one level per call; `/mentor:hint 3` sets a level, `/mentor:hint reset` starts over. Levels are cumulative. The level lives in a state file and goes into context with every prompt. | hook + state file |
 | Exit with a cost | `/mentor:off <reason>` lifts the blocks in this project for 30 min. No reason, no pause; from the third pause of a day the reason has to be longer. Every pause is logged. | hook |
 | Review with your diff | `/mentor:done` hands Claude the files you changed during the task, new files with their content, so the senior-style review comes in the first answer. | hook |
 | Code in chat | A large block of new code in Claude's answer while mentor mode is on is logged (a hook cannot take back text already shown). Diffs, logs, terminal blocks and lines already in the repo do not count. | `Stop` hook |
-| Skill trend | Tag tasks with `#topic` (or a focus topic in the title). The weekly review shows, per topic, the help each task needed over time, for example `rxjs: 3 → 2 → 1`. Nobody grades this: it is the hint level you asked for. | events log |
-| Checkpoint | `/mentor:checkpoint <topic>`: three short exercises solved without AI, timed; repeat in a few weeks at the same difficulty and compare. | hook + skill |
+| Skill trend | Tag tasks with `#topic` (or a focus topic in the title, as a whole word; `#123` stays an issue number). The weekly review shows, per topic, the help each task needed over time, for example `rxjs: 3 → 2 → 1`, with your share of the changed lines when the task had a scope. Nobody grades this: it is the hint level you asked for. | events log |
+| Checkpoint | `/mentor:checkpoint <topic>`: three short exercises solved without AI, timed until you paste the answers; repeat in a few weeks at the same difficulty and compare. A forgotten one closes itself after 2 hours. | hook + skill |
+| Understanding checks | After code Claude wrote (explain mode, outside your scope) it asks a check question and records `- check: ok/miss <topic>` in the journal; the review sums them per topic. | style + journal |
 | Weekly review | `/mentor:review-week` starts with those skill measures, then the tool's: false blocks, stops followed by a pause, delayed recall from earlier quizzes. Then it quizzes you on topics that are due (Leitner boxes) and follows up the transfer exercises. | events log + journal |
 | Transfer | `/mentor:done` ends with a transfer question and one small analogous exercise, to start as `/mentor:task <exercise> #transfer #topic`, so its result is measured (the hint level it needed), not declared. | skill + events log |
 | Topic profile | Session start reads the journal's boxes: topics you know well, topics still weak. Claude takes smaller steps on the weak ones and steps in less on the known ones. You can correct it in the journal. | journal |
@@ -157,11 +158,12 @@ box 1, and a correct answer from box 5 ticks it off. Session start mentions it w
 The question is whether you learn, so the measures that matter are about you, and as far as
 possible not judged by Claude:
 
-| Skill measure | Source |
+| Skill measure (in order of weight) | Source |
 | --- | --- |
-| Help per topic over time | the highest hint level of each `#topic` task, oldest first, from the whole log: `rxjs: 3 → 2 → 1` |
+| Checkpoints without AI | `/mentor:checkpoint` scores and times per topic, compared over weeks: fixed difficulty, no help, so the cleanest |
+| Help per topic over time | the highest hint level of each `#topic` task, oldest first, from the whole log: `rxjs: 3 → 2 → 1`, with `(2/122 lines yours)` for scoped tasks. Weaker: it also falls when tasks get easier, and you choose hint levels |
 | Transfer, measured | `#transfer` tasks and the hint level they needed |
-| Checkpoints without AI | `/mentor:checkpoint` scores and times per topic, compared over weeks |
+| Understanding of Claude's code | `check: ok/miss` answers per topic |
 
 Fewer hints is not the goal in itself: a well-used hint can teach more than struggling alone; what
 counts is needing less help *on the same topic* later. Besides those, the review reports how the
@@ -194,16 +196,25 @@ suite in `plugins/mentor/evals/`, run with `claude plugin eval` against a no-plu
 the gate stops an order, Claude does not hand over the implementation when asked how to write
 it, edits are blocked, hint 1 names no API, hint 4 leaves `TODO`s, the review finds the user's
 off-by-one bug without rewriting the function, and a debugging question gets the method, not the
-fix. Each case sets up a small git repo with `fixture.sh`.
+fix. One more case checks the opposite failure, over-restriction: a plain conceptual question
+must get a real answer. Each case sets up a small git repo with `fixture.sh`.
+
+Rubrics are frozen from 0.7.1. Two of them were corrected in 0.6.1 after the first run, which
+risks fitting the judge to the plugin's answers, so from now on a grader changes only when it is
+shown to be wrong about the task, with the reason in the commit. The `holdout-*` case was written
+before its first run and is never adjusted after seeing results.
 
 ```
 npm run eval        # all cases, with the no-plugin baseline; needs a logged-in Claude Code
 npm run eval:free   # the case that needs no model call (also run in CI)
 ```
 
-Last full run (0.7.0, 2 runs per arm): **7/7 cases, score 1.00 with the plugin, +0.71 over the
-same prompts without it** (0.29), about $2. Without the plugin Claude writes the function, edits the
-file, names the APIs at hint 1 and hands over the fixed line; with it, it does none of that.
+Last full run (0.7.1, Claude Code 2.1.316, 5 runs per case and arm): **8/8 cases, score 1.00
+with the plugin in all 40 runs, 0.21 without it**, about $6. Without the plugin Claude writes the
+function, edits the file, names the APIs at hint 1 and hands over the fixed line. On the held-out
+conceptual question it answers well but appends a complete validator every time; with the plugin
+it answers the question itself, without the solution, in all five runs, so the plugin does not
+turn into a refusal machine.
 
 This shows that the plugin makes Claude follow the rules, which is expected; it says nothing
 about whether anyone learns (that is what the measures above and your own test are for). What
@@ -211,22 +222,23 @@ it can answer is which part of the plugin produces the behaviour. `npm run eval:
 the same cases against two cut-down copies, the output style and skills alone, and the same plus
 only the Edit/Write block, and prints them next to the full plugin (`npm run eval:compare`).
 
-First ablation (0.7.0, Claude Code 2.1.316, 2 runs per case):
+Ablation (0.7.1, 5 runs per case; mean, with the range over runs where it varies):
 
 | Case | Full plugin | Style + edit block | Style only | No plugin |
 | --- | --- | --- | --- | --- |
-| suite | **1.00** | 0.96 | 0.82 | 0.29 |
-| edits are blocked | 1.00 | 1.00 | 0.00 | |
-| the gate stops an order | 1.00 | 0.75 | 0.75 | |
-| the five teaching cases (no solution, hint 1, hint 4, review, debugging) | 1.00 | 1.00 | 1.00 | |
+| suite (40 runs each) | **1.00** | 0.99 [0.50–1.00] | 0.85 [0.00–1.00] | 0.21 [0.00–1.00] |
+| edits are blocked | 1.00 | 1.00 | 0.00 | 0.00 |
+| the gate stops an order | 1.00 | 0.90 [0.50–1.00] | 0.80 [0.50–1.00] | 0.00 |
+| the six teaching cases (no solution, hint 1, hint 4, review, debugging, held-out question) | 1.00 | 1.00 | 1.00 | 0.00–0.80 |
 
-What it says: the **output style alone produces the teaching behaviour** (all five teaching
-cases at 1.00), but it does not hold the line on files. Asked to "write me the function", Claude
-with the style alone wrote it into the file in one of two runs, and it added the asked-for
-license header every time. The **edit block** keeps the files the user's, though Claude still
-tried an edit once; the **prompt gate** closes that gap, because the request never reaches
-Claude. The shell, MCP and self-protection rules are not what produces the model's behaviour in
-these cases, which is why they are frozen (see Honest limits). Cost: about $1.25 per variant.
+What it says, now on 5 runs instead of 2: the **output style alone produces the teaching
+behaviour** (all six teaching cases at 1.00 in every run), but it does not hold the line on
+files: it added the asked-for license header in every run, and asked to "write me the
+function" it wrote it into the file in some runs. The **edit block** keeps the files the user's
+(edits 1.00), though Claude still tried an edit in one of five runs; the **prompt gate** closes
+that, because the request never reaches Claude. The shell, MCP and self-protection rules are not
+what produces the model's behaviour in these cases, which is why they are frozen (see Honest
+limits). Cost: about $3.60 per variant.
 
 On Windows, `bash` on `PATH` is often `C:\Windows\System32\bash.exe`, the WSL launcher, which
 fails when no Linux distribution is installed, and every `fixture.sh` then fails. The npm

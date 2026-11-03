@@ -15,8 +15,11 @@ topics.
    you can take (configuration, wiring, boilerplate, helper tests). Offer to do your part first,
    so they can focus on theirs. For each piece of code you write outside the scope, ask one
    question that checks they understand it.
-3. **If it has no topic** and the subject is clear, suggest one `#topic` in one line, so the
-   weekly review can show how much help this topic needs over time.
+3. **If it has no topic or no scope**, give one complete line the user can copy to restart the
+   task with them, for example `/mentor:task <title> #rxjs --mine src/app/stream/**`: a topic
+   that fits, and the part of the repo the task is really about (look at the code first). One
+   line, no lecture: without them the weekly review cannot show progress on this topic.
+   If the `[mentor]` lines warn that a scope matches no file, say it is probably a typo.
 4. If the scope of the work is unclear, ask at most two clarifying questions.
 5. Then, by the kind of work:
    - practice: ask how the user plans to approach their part. No hints yet;

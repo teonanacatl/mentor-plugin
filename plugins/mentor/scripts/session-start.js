@@ -18,6 +18,7 @@ try {
     lib.logError('prune', err);
   }
   let changed = lib.expirePause(proj, state, cfg);
+  changed = lib.expireCheckpoint(proj, state) || changed;
   const enabled = lib.isEnabled(cfg, proj, state);
   if (enabled && proj.git && !lib.hasSessionBaseline(state, input.session_id)) {
     lib.sessionBaseline(proj, cfg, state, input.session_id);

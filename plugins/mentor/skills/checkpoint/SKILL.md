@@ -24,7 +24,8 @@ the topic.
 
 ## When the user pastes answers
 
-Check each answer briefly and say which are correct, without teaching yet. Then ask the user to
+Check each answer briefly and say which are correct, without teaching yet (the solving time was
+taken when the answers were pasted, so checking does not count). Then ask the user to
 end it with `/mentor:checkpoint done <correct>/<total>`.
 
 ## When it ends

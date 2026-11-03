@@ -156,7 +156,7 @@ const MESSAGES = {
       '  • /mentor:wrong — jeśli to nie była prośba o kod (zapiszę fałszywą blokadę i przepuszczę następny prompt)\n' +
       '  • /mentor:off <powód> — zrobić przerwę na {min} min (trafia do przeglądu tygodnia)',
     whyTask: 'Od startu zadania „{task}” w kodzie zmieniło się {n} z wymaganych {need} linii.',
-    whyDebug: 'W trybie debugowania bramkę otwiera hipoteza: /mentor:try <co podejrzewasz i jak to sprawdzisz>.',
+    whyDebug: 'Debugowanie: zacznij od hipotezy, /mentor:try <co podejrzewasz i jak to sprawdzisz>, albo od własnego eksperymentu w kodzie ({n} z {need} linii).',
     wrongNoted: '🧭 Zapisane jako fałszywa blokada. Następny prompt przejdzie bez bramki — wyślij go jeszcze raz.',
     wrongNothing: '🧭 W tym repo nie było ostatnio blokady do odwołania.',
     modeSet: '🧭 Tryb: {mode}.',
@@ -165,6 +165,13 @@ const MESSAGES = {
     taskModeInferred: 'tryb {mode} (z tytułu; zmiana: /mentor:mode)',
     taskScope: 'Twoja część: {scope} — resztę może pisać Claude',
     taskTopics: 'tematy: {topics}',
+    taskScopeNoMatch: '⚠ {scope} nie pasuje do żadnego pliku w repo (literówka?) — poza zakresem Claude może edytować',
+    taskSuggest: 'pełniej: /mentor:task {title} #<temat> --mine <twoja część>',
+    taskDoneExplain: ' · {lines} linii z trybu explain (kod Claude\'a)',
+    taskDoneScope: ' · w Twojej części {mine} z {all} linii',
+    explainNeedsTask: '🧭 Tryb explain dotyczy jednego zadania: /mentor:task <tytuł> --mode explain albo najpierw /mentor:task.',
+    explainEnded: ' Explain zakończony: {lines} linii Claude\'a, nie liczę ich jako Twoje.',
+    checkpointExpired: '🧭 Sprawdzian „{topic}” wygasł po {hours} h bez wyniku; zapisany jako niedokończony.',
     checkpointUsage: '🧭 /mentor:checkpoint <temat> zaczyna sprawdzian bez AI, /mentor:checkpoint done <rozwiązane>/<wszystkie> go kończy.',
     checkpointStarted: '🧭 Sprawdzian bez AI: {topic}. Claude da zadania i nie będzie podpowiadał. Koniec: /mentor:checkpoint done N/M.',
     checkpointDone: '🧭 Sprawdzian {topic}: {solved}/{total} w {min} min, zapisany.',
@@ -208,7 +215,7 @@ const MESSAGES = {
       '  • /mentor:wrong — if it was not a request for code (logged as a false block; your next prompt goes through)\n' +
       '  • /mentor:off <reason> — pause for {min} min (shows up in the weekly review)',
     whyTask: 'Since task "{task}" started, {n} of the required {need} lines of code have changed.',
-    whyDebug: 'In debug mode a hypothesis opens the gate: /mentor:try <what you suspect and how you will check it>.',
+    whyDebug: 'Debugging: start with a hypothesis, /mentor:try <what you suspect and how you will check it>, or with your own experiment in the code ({n} of {need} lines).',
     wrongNoted: '🧭 Logged as a false block. Your next prompt skips the gate — send it again.',
     wrongNothing: '🧭 No recent block in this repo to take back.',
     modeSet: '🧭 Mode: {mode}.',
@@ -217,6 +224,13 @@ const MESSAGES = {
     taskModeInferred: 'mode {mode} (from the title; change with /mentor:mode)',
     taskScope: 'your part: {scope} — Claude may write the rest',
     taskTopics: 'topics: {topics}',
+    taskScopeNoMatch: '⚠ {scope} matches no file in the repo (a typo?) — Claude may edit everything outside the scope',
+    taskSuggest: 'fuller: /mentor:task {title} #<topic> --mine <your part>',
+    taskDoneExplain: ' · {lines} lines from explain mode (Claude\'s code)',
+    taskDoneScope: ' · {mine} of {all} lines in your part',
+    explainNeedsTask: '🧭 Explain mode is for one task: /mentor:task <title> --mode explain, or start a task first.',
+    explainEnded: ' Explain ended: {lines} lines by Claude, not counted as yours.',
+    checkpointExpired: '🧭 Checkpoint "{topic}" expired after {hours} h without a result; recorded as unfinished.',
     checkpointUsage: '🧭 /mentor:checkpoint <topic> starts a test without AI, /mentor:checkpoint done <solved>/<total> ends it.',
     checkpointStarted: '🧭 Checkpoint without AI: {topic}. Claude gives the exercises and no hints. End: /mentor:checkpoint done N/M.',
     checkpointDone: '🧭 Checkpoint {topic}: {solved}/{total} in {min} min, recorded.',
@@ -298,7 +312,9 @@ function config() {
     keepDays: intOption('keep_days', 90, 7, 3650),
     chatCodeLines: intOption('chat_code_lines', 15, 3, 500),
     logText: !isOff(option('log_text', 'false')),
-    defaultMode: MODES.includes(option('default_mode', 'practice')) ? option('default_mode', 'practice') : 'practice',
+    // explain is per task only, never a default
+    defaultMode: MODES.includes(option('default_mode', 'practice')) && option('default_mode', 'practice') !== 'explain'
+      ? option('default_mode', 'practice') : 'practice',
   };
 }
 
@@ -428,18 +444,23 @@ function loadState(proj) {
   return {
     key: proj.key, pause: s.pause || null, task: s.task || null,
     sessions: s.sessions || {}, enabled: Boolean(s.enabled),
-    mode: MODES.includes(s.mode) ? s.mode : null, passOnce: Boolean(s.passOnce), checkpoint: s.checkpoint || null,
+    // Explain is per task only (0.7.1): an old repo-wide explain becomes the default again.
+    mode: MODES.includes(s.mode) && s.mode !== 'explain' ? s.mode : null,
+    passOnce: Boolean(s.passOnce), checkpoint: s.checkpoint || null,
   };
 }
 
 // The open task's own kind of work wins over the repo's.
 const modeOf = (cfg, state) => (state.task && state.task.mode) || state.mode || cfg.defaultMode;
 
-// A task title that says what kind of work it is: a bug, or understanding code.
+// A task title that says what kind of work it is, from strong signals only: "Add error handling"
+// or "Exception middleware" is feature work, not debugging.
 function inferMode(title) {
-  const t = String(title || '');
-  if (/(^|[^\p{L}])(bug|b[lł][aą]d|nie dzia[lł]a|crash|error|wyj[aą]tek|exception|regres|dlaczego|why)/iu.test(t)) return 'debug';
-  if (/(^|[^\p{L}])(zrozum|understand|jak dzia[lł]a|how does|przeczytaj|poznaj|explore|onboarding)/iu.test(t)) return 'read';
+  const t = String(title || '').trim();
+  const W = '(?![\\p{L}])';
+  if (new RegExp(`^(bug|bugfix|b[lł][aą]d|fix)${W}\\s*[:#-]|(^|[^\\p{L}])(bug|bugfix|nie dzia[lł]a|regresj\\p{L}*|regression|` +
+    `zawiesza si[eę]|wysypuje si[eę]|fix the crash|crash(es|ing)? (on|when|after|in))${W}`, 'iu').test(t)) return 'debug';
+  if (/(^|[^\p{L}])(zrozumie[cć]|zrozum|understand|jak dzia[lł]a|how does|przeczytaj|poznaj|explore|onboarding)(?![\p{L}])/iu.test(t)) return 'read';
   return null;
 }
 
@@ -452,8 +473,9 @@ function parseTaskArgs(cfg, args) {
     if (tok === '--mine') { into = 'mine'; continue; }
     if (tok.startsWith('--mine=')) { out.scope.push(...tok.slice(7).split(',').filter(Boolean)); continue; }
     if (tok === '--mode') { into = 'mode'; continue; }
+    // #123 is an issue number, not a topic: it stays in the title.
     const tag = tok.match(/^#([\p{L}\p{N}_.+-]+)$/u);
-    if (tag) {
+    if (tag && !/^\d+$/.test(tag[1])) {
       const t = tag[1].toLowerCase();
       if (t === 'transfer') out.transfer = true;
       else out.topics.push(t);
@@ -464,9 +486,10 @@ function parseTaskArgs(cfg, args) {
     out.title.push(tok);
   }
   const title = out.title.join(' ');
-  // A focus topic named in the title counts as the task's topic too.
+  // A focus topic named in the title as a whole word counts as the task's topic too ("Go" is not in "Algorithm").
   for (const f of String(cfg.focusTopics || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)) {
-    if (title.toLowerCase().includes(f) && !out.topics.includes(f)) out.topics.push(f);
+    const word = new RegExp(`(^|[^\\p{L}\\p{N}])${f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'iu');
+    if (word.test(title) && !out.topics.includes(f)) out.topics.push(f);
   }
   return { ...out, title, scope: out.scope.map((g) => g.replace(/\\/g, '/').replace(/^\.\//, '')) };
 }
@@ -486,10 +509,24 @@ function globToRegex(glob) {
   return new RegExp(`^${re}(/.*)?$`, process.platform === 'win32' ? 'i' : '');
 }
 
-// Whether a repo-relative path is inside the task's scope (the part the user writes).
+// Whether a repo-relative path is inside the task's scope (the part the user writes). The same
+// rules as .gitignore and attempt_ignore: a pattern without a slash (`*.ts`, `parser`) matches at
+// any depth, one with a slash (`src/parser/**`, `/build`) is anchored at the repo root.
 function inScope(scope, rel) {
   const p = String(rel).replace(/\\/g, '/').replace(/^\.\//, '');
-  return (scope || []).some((g) => globToRegex(g.replace(/\/$/, '')).test(p));
+  return (scope || []).some((g) => {
+    const pat = g.replace(/\/$/, '');
+    const anchored = pat.startsWith('/') || pat.includes('/');
+    return globToRegex(anchored ? pat.replace(/^\//, '') : `**/${pat}`).test(p);
+  });
+}
+
+// Scope patterns that match no file in the repo: most likely a typo, which would silently hand
+// the real code to Claude.
+function unmatchedScope(proj, scope) {
+  if (!proj.git || !scope || !scope.length) return [];
+  const files = gitTry(proj.dir, ['ls-files', '-co', '--exclude-standard', '-z']).split('\0').filter(Boolean);
+  return scope.filter((g) => !files.some((f) => inScope([g], f)));
 }
 
 // The fixed beginning of each glob (`src/parser/**` → `src/parser`), for spotting it in a command.
@@ -699,6 +736,34 @@ function endPause(proj, cfg, state, auto, now = Date.now()) {
   logEvent(proj, 'resume', { auto, pausedWork: lines, task: task ? task.title : null });
 }
 
+// Explain mode is a stretch of one task in which Claude writes code on purpose. Like a pause, the
+// code that appears during it is not the user's attempt: it is counted apart as explainWork, and
+// such a task is left out of the hint levels and the skill trend.
+function startExplain(proj, cfg, task) {
+  if ('explainBaseline' in task) return;
+  task.explainBaseline = proj.git ? compact(snapshot(proj, cfg)) : null;
+}
+
+function endExplain(proj, cfg, task) {
+  if (!('explainBaseline' in task)) return 0;
+  const b = task.explainBaseline;
+  let lines = 0;
+  let files = [];
+  if (proj.git && isCurrent(b)) {
+    const d = diffSnapshots(b, snapshot(proj, cfg, effectiveBase(proj, b.base, b.at).base));
+    lines = d.n;
+    files = d.files;
+    task.attemptBaseline = compact(snapshot(proj, cfg));
+  }
+  delete task.explainBaseline;
+  task.explainUsed = true;
+  if (lines) {
+    task.explainWork = (task.explainWork || 0) + lines;
+    task.explainFiles = [...new Set([...(task.explainFiles || []), ...files])];
+  }
+  return lines;
+}
+
 // Ends an expired pause. Returns true when the state changed.
 function expirePause(proj, state, cfg) {
   const pause = state.pause;
@@ -901,7 +966,7 @@ function attemptLines(proj, cfg, baseline) {
 
 // The review material for /mentor:done: files changed since the task started, a stat first,
 // then whole files' diffs (new files included) until the budget runs out. null outside git.
-function reviewDiff(proj, cfg, baseline, pausedFiles = [], scope = null) {
+function reviewDiff(proj, cfg, baseline, pausedFiles = [], scope = null, explainFiles = []) {
   if (!proj.git) return null;
   const status = git(proj.dir, ['status', '--short', '-uall']).trim();
   const eb = effectiveBase(proj, baseline && baseline.base, baseline && baseline.at);
@@ -916,8 +981,16 @@ function reviewDiff(proj, cfg, baseline, pausedFiles = [], scope = null) {
     const v = now.files[f];
     return `  ${f} | +${v.added} -${v.deleted}${v.untracked ? ' (new, untracked)' : ''}${v.note ? ` (${v.note})` : ''}` +
       (pausedFiles.includes(f) ? ' (changed during a pause: may be Claude\'s work, not the user\'s)' : '') +
+      (explainFiles.includes(f) ? ' (written in explain mode: Claude\'s code)' : '') +
       (scope && scope.length ? (inScope(scope, f) ? ' (the user\'s scope)' : ' (outside the user\'s scope: may be Claude\'s)') : '');
   });
+  // Lines of code changed (whitespace aside), split by the scope.
+  const scopeSplit = { mine: 0, other: 0 };
+  for (const f of changed) {
+    const d = Math.abs(count.files[f].n - (before[f] ? before[f].n : 0)) || 1;
+    if (scope && scope.length && inScope(scope, f)) scopeSplit.mine += d;
+    else scopeSplit.other += d;
+  }
   for (const f of reverted) stat.push(`  ${f} | changes from before the task were reverted`);
 
   let budget = DIFF_LIMIT;
@@ -945,6 +1018,7 @@ function reviewDiff(proj, cfg, baseline, pausedFiles = [], scope = null) {
     stat: stat.join('\n'),
     diff: parts.join('\n'),
     omitted,
+    scopeSplit,
   };
 }
 
@@ -975,11 +1049,12 @@ function statusLine(cfg, proj, state) {
     return `[mentor] PAUSED in this project until ${until} (reason: ${state.pause.reason}). ` +
       'Mentor mode is off for now: normal assistant behaviour, file edits are allowed.';
   }
-  if (state.checkpoint) {
-    return `[mentor] CHECKPOINT in progress on "${state.checkpoint.topic}": the user solves the exercises without AI. ` +
+  // A checkpoint comes first, but the task stays visible so nothing is lost while it runs.
+  const checkpoint = state.checkpoint
+    ? `[mentor] CHECKPOINT in progress on "${state.checkpoint.topic}": the user solves the exercises without AI. ` +
       'Do not give hints, answers or code about them; you may only clarify what an exercise asks. ' +
-      'It ends with /mentor:checkpoint done <solved>/<total>.';
-  }
+      'It ends with /mentor:checkpoint done <solved>/<total>.\n'
+    : '';
   const task = state.task;
   const mode = modeOf(cfg, state);
   const taskPart = task
@@ -994,7 +1069,19 @@ function statusLine(cfg, proj, state) {
   const edits = mode === 'explain' ? 'file edits are allowed in this mode'
     : scope ? 'file edits inside the scope are blocked by a hook'
       : 'file edits in the project are blocked by a hook';
-  return `[mentor] ACTIVE · ${taskPart} · mode ${MODE_SCOPE[mode]}${scope} · ${edits}.`;
+  return `${checkpoint}[mentor] ACTIVE · ${taskPart} · mode ${MODE_SCOPE[mode]}${scope} · ${edits}.`;
+}
+
+const CHECKPOINT_MAX_MS = 2 * 3600000;
+
+// A checkpoint left open for over two hours is closed as unfinished, so a forgotten one does
+// not keep Claude from helping. Returns true when the state changed.
+function expireCheckpoint(proj, state, now = Date.now()) {
+  const cp = state.checkpoint;
+  if (!cp || now - cp.startedAt < CHECKPOINT_MAX_MS) return false;
+  logEvent(proj, 'checkpoint_expired', { topic: cp.topic });
+  state.checkpoint = null;
+  return true;
 }
 
 // Whether Claude may edit this repo-relative file in the current task: explain mode, or a file
@@ -1041,24 +1128,38 @@ function pausesToday(now = Date.now()) {
 function skillLines() {
   const all = readEvents(0);
   const done = all.filter((e) => e.type === 'task_done');
-  const mark = (e) => `${e.hint || 0}${e.pausedWork > 0 ? '*' : ''}`;
-  const byTopic = {};
-  for (const d of done) {
-    if (d.mode === 'explain') continue;
-    for (const t of d.topics || []) (byTopic[t] = byTopic[t] || []).push(d);
-  }
   const lines = [];
-  const topics = Object.keys(byTopic).sort();
-  lines.push(`  - help needed per topic, task by task (highest hint level, oldest first; * = with code from a pause): ` +
-    (topics.length ? topics.map((t) => `${t}: ${byTopic[t].map(mark).join(' → ')}`).join('; ') : 'no tasks with topics yet (/mentor:task <title> #topic)'));
-  const transfers = done.filter((d) => d.transfer);
-  lines.push(`  - transfer exercises done as tasks: ${transfers.length ? transfers.map((d) => `"${d.title}" hint ${mark(d)}`).join(', ') : 'none yet (/mentor:task <exercise> #transfer)'}`);
+  // Checkpoints first: fixed difficulty, no AI, so the cleanest measure.
   const cps = all.filter((e) => e.type === 'checkpoint_done');
   const byCp = {};
   for (const c of cps) (byCp[c.topic] = byCp[c.topic] || []).push(c);
-  lines.push(`  - checkpoints without AI: ${Object.keys(byCp).length
+  lines.push(`  - checkpoints without AI (the cleanest measure: same difficulty, no help): ${Object.keys(byCp).length
     ? Object.entries(byCp).map(([t, xs]) => `${t}: ${xs.map((c) => `${c.ts.slice(0, 10)} ${c.solved}/${c.total} in ${c.minutes} min`).join(' → ')}`).join('; ')
     : 'none yet (/mentor:checkpoint <topic>)'}`);
+  // The help trend second: it also moves with how hard the tasks were, and the user picks hint levels.
+  const share = (e) => (e.scopeLines !== undefined ? ` (${e.scopeLines}/${e.scopeLines + e.otherLines} lines yours)` : '');
+  const mark = (e) => `${e.hint || 0}${e.pausedWork > 0 ? '*' : ''}${share(e)}`;
+  const byTopic = {};
+  for (const d of done) {
+    if (d.mode === 'explain' || d.explainUsed) continue;
+    for (const t of d.topics || []) (byTopic[t] = byTopic[t] || []).push(d);
+  }
+  const topics = Object.keys(byTopic).sort();
+  lines.push(`  - help needed per topic, task by task (highest hint level, oldest first; * = with code from a pause; ` +
+    'explain tasks left out; easier tasks also lower it): ' +
+    (topics.length ? topics.map((t) => `${t}: ${byTopic[t].map(mark).join(' → ')}`).join('; ') : 'no tasks with topics yet (/mentor:task <title> #topic)'));
+  const transfers = done.filter((d) => d.transfer);
+  lines.push(`  - transfer exercises done as tasks: ${transfers.length ? transfers.map((d) => `"${d.title}" hint ${mark(d)}`).join(', ') : 'none yet (/mentor:task <exercise> #transfer)'}`);
+  // Comprehension checks after code Claude wrote (explain mode, outside the scope), from the journal.
+  const checks = {};
+  for (const m of readJournal().matchAll(/^\s*- check:\s*(ok|miss)\s+(.+?)\s*$/gim)) {
+    const t = m[2].toLowerCase();
+    checks[t] = checks[t] || { ok: 0, miss: 0 };
+    checks[t][m[1].toLowerCase()]++;
+  }
+  lines.push(`  - understanding of code Claude wrote (check questions answered): ${Object.keys(checks).length
+    ? Object.entries(checks).map(([t, c]) => `${t}: ${c.ok} ok, ${c.miss} missed`).join('; ')
+    : 'none recorded yet'}`);
   return lines;
 }
 
@@ -1076,7 +1177,8 @@ function stats(days) {
   // A task with code from a pause is not counted at any hint level: part of it may be Claude's.
   // Explain-mode tasks are not either: there Claude writes the code on purpose.
   const withPause = done.filter((e) => e.pausedWork > 0);
-  const counts = (e) => !(e.pausedWork > 0) && e.mode !== 'explain';
+  const counts = (e) => !(e.pausedWork > 0) && e.mode !== 'explain' && !e.explainUsed;
+  const explained = done.filter((e) => e.mode === 'explain' || e.explainUsed);
   const byLevel = [0, 0, 0, 0, 0];
   for (const e of done) if (counts(e)) byLevel[Math.min(MAX_HINT, e.hint || 0)]++;
   const count = (type) => events.filter((e) => e.type === type).length;
@@ -1111,6 +1213,8 @@ function stats(days) {
       byLevel.map((n, i) => `${i} ${LEVELS.en[i]}: ${n}`).join(', '),
     `- closed with code written during a pause (not counted above): ${withPause.length}` +
       (withPause.length ? ` (${withPause.map((e) => `"${e.title}" ${e.pausedWork} lines`).join(', ')})` : ''),
+    `- closed with explain mode, Claude writing on purpose (not counted above): ${explained.length}` +
+      (explained.length ? ` (${explained.map((e) => `"${e.title}" ${e.explainWork || 0} lines`).join(', ')})` : ''),
     `- hints requested: ${count('hint')}`,
     `- attempts described with /mentor:try: ${count('try')}`,
     `- "ready-made code" prompts stopped by the gate: ${count('gate_block')}`,
@@ -1236,9 +1340,10 @@ module.exports = {
   DATA_DIR, EVENTS_FILE, LEARNING_FILE, MARKER, EMPTY_TREE, MAX_HINT, IDLE_MS, LEVELS, LEVEL_SCOPE, DEFAULT_GATE,
   PAUSES_BEFORE_LONG_REASON, LONG_REASON,
   config, gate, asksForCode, isQuestion, stripPasted, t, levelName, readInput, git, gitTry, project, loadState, saveState,
-  MODES, MODE_SCOPE, EVENT_V, logText, modeOf, inferMode, parseTaskArgs, inScope, scopePrefixes, assistAllowed,
+  MODES, MODE_SCOPE, EVENT_V, logText, modeOf, inferMode, parseTaskArgs, inScope, unmatchedScope, scopePrefixes, assistAllowed,
   forgetEvents, journalStats, topicProfile,
   lockState, logEvent, logError, pruneEvents, isEnabled, isPaused, isActive, startPause, endPause, expirePause, touchTask,
+  startExplain, endExplain, expireCheckpoint,
   fmtTime, localDate,
   headCommit, snapshot, compact, isCurrent, changedLines, attemptLines, effectiveBase, reviewDiff, hasSessionBaseline,
   sessionBaseline, statusLine, readEvents, pausesToday, stats, dueRepeats, appendLearning, respond, blockPrompt,

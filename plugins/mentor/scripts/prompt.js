@@ -42,6 +42,8 @@ function newTask(ctx, title, implicit, opts = {}) {
   };
   lib.logEvent(proj, 'task_start', { title, mode, ...extra, ...(implicit ? { implicit: true } : {}) });
   return { title, mode, ...(inferred ? { modeInferred: true } : {}), ...extra,
+    // A task in explain mode from the start: everything written in it is counted as explainWork.
+    ...(mode === 'explain' ? { explainBaseline: baseline } : {}),
     startedAt: now, lastActiveAt: now, activeMs: 0, hint: 0, baseline, attempted: false };
 }
 
@@ -77,15 +79,22 @@ function handleCommand(ctx, name, args) {
       state.task = newTask(ctx, opts.title, false, opts);
       save();
       const t = state.task;
+      const unmatched = lib.unmatchedScope(proj, t.scope);
       const notes = [
         lib.t(cfg, 'taskStarted', { task: t.title }),
         lib.t(cfg, t.modeInferred ? 'taskModeInferred' : 'taskMode', { mode: t.mode }),
         t.scope ? lib.t(cfg, 'taskScope', { scope: t.scope.join(', ') }) : '',
+        unmatched.length ? lib.t(cfg, 'taskScopeNoMatch', { scope: unmatched.join(', ') }) : '',
         t.topics ? lib.t(cfg, 'taskTopics', { topics: t.topics.join(', ') }) : '',
+        // Without a topic and a scope the task feeds no trend: a ready line to copy.
+        !t.topics && !t.scope ? lib.t(cfg, 'taskSuggest', { title: t.title }) : '',
       ].filter(Boolean);
       return context(`[mentor] New task started: "${t.title}". Hint level 0/${lib.MAX_HINT}. Mode: ${t.mode}` +
         (t.modeInferred ? ' (read from the title; the user can change it with /mentor:mode)' : '') + '.' +
         (t.scope ? ` The user's scope: ${t.scope.join(', ')}.` : '') +
+        (unmatched.length ? ` Warning: ${unmatched.join(', ')} matches no file in the repo; tell the user it may be a typo.` : '') +
+        (!t.topics && !t.scope ? ' The task has no #topic and no --mine scope: suggest a complete line to copy, ' +
+          `"/mentor:task ${t.title} #<topic> --mine <glob>", with a topic and the part of the repo that fits.` : '') +
         (t.topics ? ` Topics: ${t.topics.join(', ')}.` : '') + (t.transfer ? ' This is a transfer exercise.' : '') +
         `\n${lib.statusLine(cfg, proj, state)}`, notes.join(' · '));
     }
@@ -137,21 +146,29 @@ function handleCommand(ctx, name, args) {
       if (!task) return context('[mentor] /mentor:done was typed, but no task is open in this project.', lib.t(cfg, 'noTask'));
       const minutes = Math.round((task.activeMs || 0) / 60000);
       const wallMinutes = Math.round((now - task.startedAt) / 60000);
-      const review = lib.reviewDiff(proj, cfg, task.baseline, task.pausedFiles || [], task.scope);
+      const mode = task.mode || lib.modeOf(cfg, state);
+      lib.endExplain(proj, cfg, task);
+      const review = lib.reviewDiff(proj, cfg, task.baseline, task.pausedFiles || [], task.scope, task.explainFiles || []);
       const changed = review ? review.stat !== '' : null;
       const pausedWork = task.pausedWork || 0;
-      const mode = task.mode || lib.modeOf(cfg, state);
+      const explainWork = task.explainWork || 0;
+      // With a scope, how much of the change is in the user's part: 2 of 122 lines is not "solved alone".
+      const split = task.scope && review ? review.scopeSplit : null;
       lib.logEvent(proj, 'task_done', {
         title: task.title, hint: task.hint, mode, minutes, wallMinutes, changed, pausedWork, learned: args || '',
+        ...(task.explainUsed ? { explainUsed: true, explainWork } : {}),
         ...(task.topics ? { topics: task.topics } : {}), ...(task.scope ? { scope: task.scope } : {}),
+        ...(split ? { scopeLines: split.mine, otherLines: split.other } : {}),
         ...(task.transfer ? { transfer: true } : {}),
       });
       lib.appendLearning(
         `## ${lib.localDate(now)} — ${task.title}\n` +
         `- hints: ${task.hint}/${lib.MAX_HINT} (${lib.LEVELS.en[task.hint]}) · ${minutes} min of work · mode ${mode}` +
         (task.topics ? ` · topics ${task.topics.join(', ')}` : '') + (task.transfer ? ' · transfer exercise' : '') + '\n' +
-        (task.scope ? `- my part: ${task.scope.join(', ')} (the rest may be Claude's)\n` : '') +
+        (task.scope ? `- my part: ${task.scope.join(', ')} (the rest may be Claude's)` +
+          (split ? ` · ${split.mine} of ${split.mine + split.other} changed lines in my part` : '') + '\n' : '') +
         (pausedWork ? `- ${pausedWork} lines changed during a pause (normal mode), not counted as mine\n` : '') +
+        (explainWork ? `- ${explainWork} lines written by Claude in explain mode, not counted as mine\n` : '') +
         (args ? `- in my words: ${args}\n` : ''));
       state.task = null;
       save();
@@ -169,8 +186,10 @@ function handleCommand(ctx, name, args) {
           : '') +
         (task.scope ? ` The user's scope was ${task.scope.join(', ')}: review the files inside it as their work; files ` +
           'outside it may be yours, so do not credit them to the user.' : '') +
-        (mode === 'explain' ? ' In explain mode you wrote code on purpose: end with two questions that check the ' +
-          'user understands it, instead of a review of their code.' : '');
+        (task.explainUsed ? ` Explain mode was used in this task (${explainWork} lines${task.explainFiles ? ' in ' +
+          task.explainFiles.join(', ') : ''}): you wrote that code on purpose. Do not review it as the user's; end with ` +
+          'two questions that check the user understands it, and record the answers as `- check: ok|miss <topic>`.' : '') +
+        (split ? ` Changed lines: ${split.mine} in the user's scope, ${split.other} outside it.` : '');
       if (review) {
         const base = review.base === lib.EMPTY_TREE
           ? 'the empty tree (no commits yet)'
@@ -185,7 +204,9 @@ function handleCommand(ctx, name, args) {
         }
       }
       return context(text, lib.t(cfg, 'taskDone', { task: task.title, n: task.hint, min: minutes }) +
-        (pausedWork ? lib.t(cfg, 'taskDonePaused', { lines: pausedWork }) : ''));
+        (pausedWork ? lib.t(cfg, 'taskDonePaused', { lines: pausedWork }) : '') +
+        (explainWork ? lib.t(cfg, 'taskDoneExplain', { lines: explainWork }) : '') +
+        (split ? lib.t(cfg, 'taskDoneScope', { mine: split.mine, all: split.mine + split.other }) : ''));
     }
 
     case 'off': {
@@ -209,6 +230,7 @@ function handleCommand(ctx, name, args) {
       const reason = restWords.join(' ').trim();
       if (wanted === 'normal') {
         const today = checkPauseReason(cfg, reason, now, 'modeNeedsReason');
+        if (task) lib.endExplain(proj, cfg, task);
         lib.startPause(proj, cfg, state, reason, now + NEVER_MS, true);
         lib.logEvent(proj, 'pause', { reason, mode: 'normal', indefinite: true, task: task ? task.title : null, today: today + 1 });
         save();
@@ -217,12 +239,22 @@ function handleCommand(ctx, name, args) {
       if (!lib.MODES.includes(wanted)) {
         return context(lib.statusLine(cfg, proj, state), lib.t(cfg, 'modeUnknown', { mode: lib.modeOf(cfg, state) }));
       }
+      // Explain belongs to one task, never the repo: otherwise every next task would start in it.
+      if (wanted === 'explain' && !task) return context(lib.statusLine(cfg, proj, state), lib.t(cfg, 'explainNeedsTask'));
       if (paused && state.pause.indefinite) lib.endPause(proj, cfg, state, false, now);
-      state.mode = wanted;
-      if (task) task.mode = wanted;
-      lib.logEvent(proj, 'mode', { mode: wanted, task: task ? task.title : null });
+      let explained = 0;
+      if (wanted === 'explain') {
+        task.mode = 'explain';
+        lib.startExplain(proj, cfg, task);
+      } else {
+        if (task) explained = lib.endExplain(proj, cfg, task);
+        state.mode = wanted;
+        if (task) task.mode = wanted;
+      }
+      lib.logEvent(proj, 'mode', { mode: wanted, task: task ? task.title : null, ...(explained ? { explainWork: explained } : {}) });
       save();
-      return context(lib.statusLine(cfg, proj, state), lib.t(cfg, 'modeSet', { mode: wanted }));
+      return context(lib.statusLine(cfg, proj, state), lib.t(cfg, 'modeSet', { mode: wanted }) +
+        (explained ? lib.t(cfg, 'explainEnded', { lines: explained }) : ''));
     }
 
     case 'wrong': {
@@ -238,13 +270,15 @@ function handleCommand(ctx, name, args) {
     case 'checkpoint': {
       // A short test without AI: start with a topic, finish with the score. Logged with the time,
       // so the trend per topic does not depend on how Claude grades anything.
-      const done = args.match(/^done\s+(\d+)\s*\/\s*(\d+)\s*$/i);
+      const done = args.match(/^done\s+(\d+)\s*\/\s*(\d+)(?:\s+(\d+)\s*(?:min)?)?\s*$/i);
       if (done) {
         const cp = state.checkpoint;
         if (!cp) return context(lib.statusLine(cfg, proj, state), lib.t(cfg, 'checkpointNone'));
         const solved = Number(done[1]);
         const total = Number(done[2]);
-        const minutes = Math.round((now - cp.startedAt) / 60000);
+        // The solving time: given by the user, else until the answers were pasted (the first long
+        // prompt), not until the end of Claude's checking.
+        const minutes = done[3] ? Number(done[3]) : Math.round(((cp.answeredAt || now) - cp.startedAt) / 60000);
         lib.logEvent(proj, 'checkpoint_done', { topic: cp.topic, solved, total, minutes });
         lib.appendLearning(`## Checkpoint ${cp.topic} ${lib.localDate(now)}\n- result: ${solved}/${total} in ${minutes} min, without AI\n`);
         state.checkpoint = null;
@@ -316,25 +350,25 @@ function handleCommand(ctx, name, args) {
   }
 }
 
-// Whether the user has made the attempt this mode asks for. Practice and guided: changed lines
-// of code since the task (or else the session) started, or /mentor:try. Debug: a hypothesis
-// (/mentor:try) only. Read: no gate.
+// Whether the user has made an attempt: changed lines of code since the task (or else the
+// session) started, or /mentor:try. In debug mode a code change is an experiment and counts too;
+// the gate's message only asks for a hypothesis first. Read and explain: no gate.
 function attempt(ctx) {
   const { cfg, proj, state, input } = ctx;
   const mode = lib.modeOf(cfg, state);
   const task = state.task;
+  const debug = mode === 'debug';
   if (mode === 'read' || mode === 'explain') return { ok: true };
   // With a scope the edit block on the user's part does the work: a prompt cannot be mapped to
   // paths, and asking Claude for the routine rest is the point of the scope.
   if (task && task.scope && task.scope.length) return { ok: true };
   if (task && task.attempted) return { ok: true };
-  if (mode === 'debug') return { ok: false, debug: true };
   if (!proj.git) return { ok: true }; // outside git there is nothing to compare against
   const session = state.sessions[input.session_id || 'default'];
   const baseline = task ? task.attemptBaseline || task.baseline : session && session.baseline;
   if (!baseline) return { ok: true };
   const n = lib.attemptLines(proj, cfg, baseline);
-  return { ok: n >= cfg.minLines, n };
+  return { ok: n >= cfg.minLines, n, debug };
 }
 
 function main() {
@@ -347,6 +381,15 @@ function main() {
   const now = Date.now();
   const ctx = { cfg, proj, state, input, now };
   let changed = lib.expirePause(proj, state, cfg);
+  const expiredCheckpoint = state.checkpoint && state.checkpoint.topic;
+  if (lib.expireCheckpoint(proj, state, now)) {
+    changed = true;
+    ctx.notice = lib.t(cfg, 'checkpointExpired', { topic: expiredCheckpoint, hours: 2 });
+  } else if (state.checkpoint && !state.checkpoint.answeredAt && prompt.length >= 120 && !prompt.startsWith('/')) {
+    // A long prompt during a checkpoint is most likely the pasted answers: solving ends here.
+    state.checkpoint.answeredAt = now;
+    changed = true;
+  }
 
   const cmd = prompt.match(COMMAND);
   if (cmd) return handleCommand(ctx, cmd[1].toLowerCase(), cmd[2].trim());
@@ -387,7 +430,7 @@ function main() {
     }
   }
 
-  context(lib.statusLine(cfg, proj, state));
+  context(lib.statusLine(cfg, proj, state), ctx.notice);
 }
 
 try {
