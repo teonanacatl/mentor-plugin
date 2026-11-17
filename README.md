@@ -150,8 +150,10 @@ adds an hour, not the night.
 
 `/mentor:done` and `/mentor:whats-new` add topics to the journal as
 `- [ ] repeat: <topic> (box 1, due <tomorrow>)`. The weekly quiz asks only about items that are
-due; a correct answer moves the item up a box (3, 7, 14, 30 days), a wrong one sends it back to
-box 1, and a correct answer from box 5 ticks it off. Session start mentions it when items are due.
+due. A topic moves up a box (3, 7, 14, 30 days) only when two questions on it, from different
+angles, are both answered right from memory; a partly right answer, or one given after a hint,
+sends it back to box 1. From box 5 it also takes an edge case to tick it off. Session start
+mentions it when items are due.
 
 ### What is measured
 
@@ -209,8 +211,9 @@ npm run eval        # all cases, with the no-plugin baseline; needs a logged-in 
 npm run eval:free   # the case that needs no model call (also run in CI)
 ```
 
-Last full run (0.7.1, Claude Code 2.1.316, 5 runs per case and arm): **8/8 cases, score 1.00
-with the plugin in all 40 runs, 0.21 without it**, about $6. Without the plugin Claude writes the
+Last full run (0.7.3, with the stricter questioning rules, Claude Code 2.1.319, 5 runs per case and
+arm): **8/8 cases, score 1.00 with the plugin in all 40 runs, 0.21 without it**, about $6 (0.7.1
+scored the same). Without the plugin Claude writes the
 function, edits the file, names the APIs at hint 1 and hands over the fixed line. On the held-out
 conceptual question it answers well but appends a complete validator every time; with the plugin
 it answers the question itself, without the solution, in all five runs, so the plugin does not
@@ -346,6 +349,13 @@ npm test
 npm run validate
 npm run eval
 ```
+
+## Acknowledgements
+
+The questioning rules (end on the question, a narrower question instead of the answer, push back
+on right answers, two checks from memory before a topic counts as known) follow the ideas of the
+[`socratic-tutor`](https://github.com/janestreet/agent_skills/blob/master/socratic-tutor/SKILL.md)
+skill from Jane Street's `agent_skills`, rewritten for this plugin.
 
 ## License
 

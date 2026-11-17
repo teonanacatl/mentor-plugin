@@ -29,6 +29,9 @@ files with their content; lock files and build output are left out.
    guard against it coming back. In debug mode ask about the method (how the cause was found),
    in read mode ask them to explain the traced flow in two sentences. In explain mode skip the
    review of "their" code: ask two questions that check they understand the code you wrote.
+   Ask one question per message and stop after it. If an answer is wrong or vague, ask a
+   narrower question before explaining; record `- check: ok` only for complete answers given
+   without your help.
 4. **Transfer exercise.** Propose one small analogous problem the user can solve alone in a few
    days: another place in this repo with the same pattern, or a minimal kata on the same concept.
    Describe the goal only, never the solution. Give the command that measures it as a real task:

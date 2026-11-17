@@ -54,8 +54,16 @@ An open item looks like `- [ ] repeat: <topic> (box N, due YYYY-MM-DD)`. Today's
 - Ask three to five open questions, **one at a time**, and wait for each answer.
 - Questions check understanding, not trivia: why something works, when to choose A over B,
   what breaks if…, how to recognise a problem. Tie them to the user's own tasks when you can.
-- After each answer: one or two sentences, what was right, what was missing, a docs link if
-  a gap showed up.
+- End each message on the question; give no hint after it.
+- **Two checks per topic.** When the first answer is right, ask a second question on the same
+  topic from another angle (predict a result, find the flaw in a wrong claim, apply it to a new
+  case). Both answers come from memory: an answer given after you hinted or explained does not
+  count as recall.
+- When an answer is wrong, do not correct it at once: ask a narrower question that shows the
+  contradiction. Explain only after two or three failed attempts, with a docs link, and then
+  check the idea once more from another angle.
+- A vague or partly right answer is not right; probe until you know. Do not credit the user with
+  an insight they did not state. No praise padding.
 
 If nothing is due, say when the next item is due and quiz from the focus topics instead; if the
 journal has no items at all, say that it fills up through `/mentor:done` and `/mentor:whats-new`.
@@ -71,10 +79,12 @@ exercise was too easy or not relevant; then close it as `(skipped: <why>)`.
 
 In `${CLAUDE_PLUGIN_DATA}/LEARNING.md`, rewrite each quizzed line in place:
 
-- **Correct and complete:** move one box up and set the next due date: box 2 in 3 days, box 3 in
-  7 days, box 4 in 14 days, box 5 in 30 days. A correct answer from box 5 makes it
+- **Both checks right, from memory:** move one box up and set the next due date: box 2 in 3 days,
+  box 3 in 7 days, box 4 in 14 days, box 5 in 30 days. From box 5 it takes both checks right and
+  one edge case or adversarial question handled to make it
   `- [x] repeat: <topic> (mastered YYYY-MM-DD)`.
-- **Partly correct or wrong:** back to box 1, due tomorrow.
+- **Anything less** (one check wrong, partly right, or right only after a hint): back to box 1,
+  due tomorrow.
 - Lines without box and date get them now, in the same format.
 - Transfer items: `- [x] transfer: <exercise> (solved alone YYYY-MM-DD)`, `(with hints YYYY-MM-DD)`,
   `(not solved YYYY-MM-DD)` or `(skipped: <why>)`; one not tried yet stays open with a due date

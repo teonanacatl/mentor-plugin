@@ -66,6 +66,7 @@ function compare() {
   for (const [k, f] of Object.entries(files)) {
     try {
       loaded[k] = JSON.parse(fs.readFileSync(path.join(results, f), 'utf8'));
+      loaded[k]._date = fs.statSync(path.join(results, f)).mtime.toISOString().slice(0, 10);
     } catch {
       // not run yet
     }
@@ -99,15 +100,16 @@ function compare() {
 function saveSummary(loaded, names, cols, runs, cell) {
   const version = JSON.parse(fs.readFileSync(path.join(plugin, '.claude-plugin', 'plugin.json'), 'utf8')).version;
   const meta = Object.entries(loaded).filter(([k]) => k !== 'no plugin').map(([k, r]) =>
-    `| ${k} | ${r.claudeVersion || '?'} | ${r.cases[0] ? (r.cases[0].arms.with || []).length : 0} | $${(r.costUsd || 0).toFixed(2)} |`);
+    `| ${k} | ${r._date || '?'} | ${r.claudeVersion || '?'} | ${r.cases[0] ? (r.cases[0].arms.with || []).length : 0} | $${(r.costUsd || 0).toFixed(2)} |`);
   const md = [
     `# Eval results`, '',
-    `Plugin ${version}. Written by \`node scripts/run-evals.js --compare --save\` from the last runs in \`results/\`.`,
+    `Written by \`node scripts/run-evals.js --compare --save\` from the last runs in \`results/\`, plugin ${version}`,
+    'at the time of writing. The columns may come from different dates: see the table at the end.',
     'Each cell: the mean score over runs, the range when it varies, and the number of runs.', '',
     `| case | ${cols.join(' | ')} |`, `| --- | ${cols.map(() => '---').join(' | ')} |`,
     ...names.map((n) => `| ${n} | ${cols.map((c) => cell(runs(loaded[c], n))).join(' | ')} |`),
     `| **suite (all runs)** | ${cols.map((c) => cell(names.flatMap((n) => runs(loaded[c], n)))).join(' | ')} |`, '',
-    '| run | Claude Code | runs per case | cost |', '| --- | --- | --- | --- |', ...meta, '',
+    '| run | date | Claude Code | runs per case | cost |', '| --- | --- | --- | --- | --- |', ...meta, '',
   ].join('\n');
   fs.writeFileSync(path.join(plugin, 'evals', 'SUMMARY.md'), md);
   console.log('\nwrote plugins/mentor/evals/SUMMARY.md');
