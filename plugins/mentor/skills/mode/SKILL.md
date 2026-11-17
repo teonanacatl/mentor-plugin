@@ -1,6 +1,6 @@
 ---
-description: Switch the kind of mentoring for this repo - practice (default), guided, debug, read (understand code), explain (Claude writes, you prove you understand), or normal <reason> (mentor off until you switch back)
-argument-hint: <practice|guided|debug|read|explain|normal <reason>>
+description: Switch the kind of mentoring for this repo - practice (default), guided, debug, read (understand code), explain (Claude writes, you prove you understand), or normal with a reason (mentor off until you switch back)
+argument-hint: [practice|guided|debug|read|explain|normal reason]
 disable-model-invocation: true
 ---
 

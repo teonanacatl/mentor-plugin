@@ -1,6 +1,6 @@
 ---
 description: Describe your own attempt or hypothesis (a diagnosis, a plan, what you checked); counts as an attempt for the try-first gate without touching files
-argument-hint: <what I checked / what I suspect>
+argument-hint: [what I checked or suspect]
 disable-model-invocation: true
 ---
 
